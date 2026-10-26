@@ -1,3 +1,6 @@
+# Go 构建产物
+/bin/
+
 # 本地工具状态
 /.workbuddy/
 /.zcode/

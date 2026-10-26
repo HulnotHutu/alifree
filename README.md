@@ -1,9 +1,17 @@
-# DashScope API cURL 测试
+# DashScope / 百炼工具集
 
-本文档用于通过 `curl` 测试 DashScope / Model Studio API，包括模型查询、Workspace 配置、Chat Model 调用和单次请求用量查看。账户级的**免费额度查询**由零依赖 Python 脚本 `free_quota_lite.py` 提供，见[免费额度查询（Python 工具）](#免费额度查询python-工具)。
+Go 实现的工具集：**百炼免费额度 CLI 与本地看板**，以及通过 `curl` 测试 DashScope / Model Studio API 的参考文档。
+
+免费额度部分（`quota fetch` / `quota serve`）从官方 bailian-cli 源码裁减而来，用 AK/SK 查询账户级免费额度，详见[免费额度 CLI](#免费额度-cliquota-fetch)。
 
 ## 目录
 
+- [目录结构](#目录结构)
+- [构建与测试](#构建与测试)
+- [免费额度 CLI（quota fetch）](#免费额度-cliquota-fetch)
+- [额度看板（quota serve）](#额度看板quota-serve)
+- [准备凭证](#准备凭证)
+- [定时抓取（cron）](#定时抓取cron)
 - [环境要求](#环境要求)
 - [配置环境变量](#配置环境变量)
 - [Endpoint 配置](#endpoint-配置)
@@ -18,14 +26,141 @@
 - [Workspace 配置](#workspace-配置)
 - [HTTP 状态码](#http-状态码)
 - [关于额度查询](#关于额度查询)
-- [免费额度查询（Python 工具）](#免费额度查询python-工具)
-- [额度看板（网页）](#额度看板网页)
 - [相关 Python SDK API](#相关-python-sdk-api)
 - [License](#license)
 
+## 目录结构
+
+```text
+dashscope-call/
+├── cmd/quota/            # 入口：quota fetch / quota serve
+├── internal/
+│   ├── bailian/          # ACS3 签名、CLI token、控制台网关、额度快照
+│   ├── store/            # 归档目录读写（free-quota-*.json / latest.json / run.log）
+│   ├── format/           # K/M 数字与到期日格式化
+│   └── app/              # cobra 命令、HTTP 看板服务、内嵌页面
+├── ROUTE.md              # DashScope API 路由调研
+├── status.md             # 免费额度接口调研记录（含网页版 cookie 路线）
+└── Makefile
+```
+
+## 构建与测试
+
+需要 Go 1.24+（模块代理不通时可设 `HTTPS_PROXY=socks5://127.0.0.1:10808`）：
+
+```bash
+make build     # 构建 bin/quota
+make test      # 单元测试
+make vet fmt   # 静态检查与格式化
+```
+
+## 免费额度 CLI（quota fetch）
+
+查询当前账号有哪些模型有免费额度、还剩多少、何时到期：
+
+```bash
+./bin/quota fetch            # 文本表格，按剩余比例升序（最紧张在前）
+./bin/quota fetch --json     # JSON 输出
+./bin/quota fetch --archive  # 归档到数据目录并更新 latest.json（cron 用）
+./bin/quota fetch --ak <ID> --sk <Secret>   # 也可直接传参（不推荐，会进 shell 历史）
+```
+
+文本输出示例：
+
+```text
+免费额度：82 个模型有额度（共 365 个模型）
+model                               type      remaining  total    %  expires
+qwen3.7-flash-2026-07-15            Text          677.2K  1M   67.7  2026-10-23
+qwen3.8-max                         Text          999.7K  1M  100.0  2026-11-01
+qwen3.8-flash                       Text               1M  1M  100.0  2026-11-25
+```
+
+JSON 输出结构（`--json`，与旧版 Python 工具的归档格式完全一致）：
+
+```json
+{
+  "fetched_at": "2026-10-17T00:29:30+08:00",
+  "source": "https://bailian-cs.console.aliyun.com/cli/api.json?action=...",
+  "summary": { "totalModels": 365, "withQuota": 82 },
+  "models": [
+    {
+      "model": "qwen3.7-flash-2026-07-15",
+      "type": "Text",
+      "remaining": 677194.0,
+      "total": 1000000.0,
+      "remainingPercent": 67.7,
+      "expires": "2026-10-23"
+    }
+  ]
+}
+```
+
+退出码：`0` 成功；`1` 服务/网络错误或缺少凭证（服务端错误码原样透出）。
+
+### 原理
+
+`internal/bailian` 组合三条接口（对齐官方 [modelstudioai/cli](https://github.com/modelstudioai/cli) 的实现）：
+
+1. 用 AK/SK 做 ACS3-HMAC-SHA256 签名，调用 OpenAPI `GenerateCLIAccessToken` 换取 CLI access token；
+2. 匿名调用控制台网关的 `listFoundationModels` 获取模型清单；
+3. 带 `Authorization: Bearer <token>` 调用 `queryFreeTierQuota` 获取额度，过滤出 `quotaStatus=VALID` 且额度大于 0 的模型。
+
+更完整的接口调研记录（含网页版 cookie 接口、官方 CLI 源码结论、凭证合规路径）见 `status.md`。
+
+## 额度看板（quota serve）
+
+本地起一个小服务，把免费额度归档 JSON 渲染成可搜索、筛选、排序的网页表格：
+
+```bash
+./bin/quota serve            # 默认 http://127.0.0.1:8377
+./bin/quota serve --port 9000 --open
+```
+
+- 数据读 `~/.local/share/bailian-quota/`（`latest.json` 优先），与 `quota fetch --archive` 共用；
+- 页面右上角的「刷新」按钮临时执行一次抓取并归档，需要凭证（见下节）；
+- 服务只绑定 `127.0.0.1`，凭证只在服务端进程内使用，不会发送到浏览器；
+- HTTP API：`GET /api/quota`（JSON 快照）、`POST /api/refresh`（刷新并归档）；
+- 页面顶部显示快照时间并提示是否过期；「即将到期 / 已过期」按本机日期实时计算，统计条可直接点击筛选。
+
+## 准备凭证
+
+需要一对阿里云 AK/SK（AccessKey ID / Secret），建议在 [RAM 控制台](https://ram.console.aliyun.com) 创建**专用 RAM 用户**并挂 `AliyunBailianReadOnlyAccess`，不要使用主账号 AK（官方强烈不建议）。API Key（`sk-`）**不能**用于查询免费额度——控制台网关会拒绝（返回 `BailianGateway.Login.NotLogined`）。
+
+凭证读取顺序：`--ak/--sk` 参数 > 环境变量 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`（及可选 `ALIBABA_CLOUD_SECURITY_TOKEN`）> 凭证文件中的同名键。凭证文件默认 `~/.config/bailian-quota.env`（可用 `--env-file` 或 `BAILIAN_ENV_FILE` 覆盖）：
+
+```bash
+mkdir -p ~/.config
+cat > ~/.config/bailian-quota.env <<'EOF'
+ALIBABA_CLOUD_ACCESS_KEY_ID=LTAI...
+ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
+EOF
+chmod 600 ~/.config/bailian-quota.env
+```
+
+## 定时抓取（cron）
+
+```bash
+( crontab -l; echo "15 9 * * * $HOME/note-space/dashscope-call/bin/quota fetch --archive" ) | crontab -
+```
+
+输出目录结构（`BAILIAN_OUT_DIR` 可覆盖）：
+
+```text
+~/.local/share/bailian-quota/
+├── free-quota-2026-10-17.json   # 每日完整 JSON（含 fetched_at/summary）
+├── latest.json                  # 指向最新一次结果的软链
+└── run.log                      # 每次运行记录
+```
+
+### 注意事项
+
+- AK/SK 是唯一能无人值守查询免费额度的凭证；浏览器授权（官方 `bl auth login --console` 流程）也可查询，但 token 会过期、需人工重新授权；
+- 不要把真实 AK/SK 提交到 Git 仓库（`.gitignore` 已排除 `*.env`）；
+- `GenerateCLIAccessToken` 是控制台内部接口（未收录在公开 API 目录），本工具复刻的是官方 CLI 的实现；如需完全文档化的路径，可安装官方 CLI 使用 `bl usage free`（详见 `status.md`）。
+
 ## 环境要求
 
-需要安装：
+`quota` 工具构建时需要 [Go](https://go.dev)；以下 curl 文档章节需要：
 
 - `curl`
 - `jq`
@@ -664,126 +799,7 @@ GET /api/v1/models
 - 最终是否可调用，应以实际模型调用结果为准；
 - 测试调用本身可能消耗额度。
 
-查询**账户级**免费额度见下一节。
-
-## 免费额度查询（Python 工具）
-
-`/api/v1/models` 等模型域接口无法查询账户级免费额度——免费额度是控制台商贸数据，需要控制台凭证。项目根目录提供两个零依赖（Python 标准库）工具：
-
-| 文件 | 用途 |
-|---|---|
-| `free_quota_lite.py` | 查询并列出有免费额度的模型 |
-| `run_free_quota.sh` | cron 包装器：读凭证文件 → 运行脚本 → 归档 JSON 输出 |
-
-### 准备凭证
-
-需要一对阿里云 AK/SK（AccessKey ID / Secret），建议在 [RAM 控制台](https://ram.console.aliyun.com) 创建**专用 RAM 用户**并挂 `AliyunBailianReadOnlyAccess`，不要使用主账号 AK（官方强烈不建议）。API Key（`sk-`）**不能**用于查询免费额度——控制台网关会拒绝（返回 `BailianGateway.Login.NotLogined`）。
-
-### 运行
-
-```bash
-export ALIBABA_CLOUD_ACCESS_KEY_ID="LTAI..."
-export ALIBABA_CLOUD_ACCESS_KEY_SECRET="..."
-
-python3 free_quota_lite.py            # 文本表格，按剩余比例升序（最紧张在前）
-python3 free_quota_lite.py --json     # JSON 输出
-python3 free_quota_lite.py --ak <ID> --sk <Secret>   # 也可直接传参（不推荐，会进 shell 历史）
-```
-
-文本输出示例：
-
-```text
-免费额度：82 个模型有额度（共 365 个模型）
-model                               type           remaining     total       %  expires
-qwen3.7-flash-2026-07-15            Text              677.2K        1M    67.7  2026-10-23
-qwen3.8-max                         Text              999.7K        1M   100.0  2026-11-01
-qwen3.8-flash                       Text                   1M        1M   100.0  2026-11-25
-...
-```
-
-JSON 输出结构（`--json`）：
-
-```json
-{
-  "fetched_at": "2026-10-17T00:29:30+08:00",
-  "source": "https://bailian-cs.console.aliyun.com/cli/api.json?action=...",
-  "summary": { "totalModels": 365, "withQuota": 82 },
-  "models": [
-    {
-      "model": "qwen3.7-flash-2026-07-15",
-      "type": "Text",
-      "remaining": 677194.0,
-      "total": 1000000.0,
-      "remainingPercent": 67.7,
-      "expires": "2026-10-23"
-    }
-  ]
-}
-```
-
-退出码：`0` 成功；`1` 服务/网络错误（服务端错误码原样透出）；`2` 缺少凭证。
-
-### 原理
-
-脚本组合了三条接口（对齐官方 `bl` CLI 的实现）：
-
-1. 用 AK/SK 做 ACS3-HMAC-SHA256 签名，调用 OpenAPI `GenerateCLIAccessToken` 换取 CLI access token；
-2. 匿名调用控制台网关的 `listFoundationModels` 获取模型清单；
-3. 带 `Authorization: Bearer <token>` 调用 `queryFreeTierQuota` 获取额度，过滤出 `quotaStatus=VALID` 且额度大于 0 的模型。
-
-更完整的接口调研记录（含网页版 cookie 接口、官方 CLI 源码结论、凭证合规路径）见 `status.md`。
-
-### 定时抓取（cron）
-
-凭证放独立文件（不要写进 crontab）：
-
-```bash
-mkdir -p ~/.config
-cat > ~/.config/bailian-quota.env <<'EOF'
-ALIBABA_CLOUD_ACCESS_KEY_ID=LTAI...
-ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
-EOF
-chmod 600 ~/.config/bailian-quota.env
-```
-
-手动运行与挂 cron：
-
-```bash
-./run_free_quota.sh    # 输出到 ~/.local/share/bailian-quota/
-
-# 每天 9:15 抓取一次
-( crontab -l; echo "15 9 * * * $(pwd)/run_free_quota.sh" ) | crontab -
-```
-
-输出目录结构：
-
-```text
-~/.local/share/bailian-quota/
-├── free-quota-2026-10-17.json   # 每日完整 JSON（含 fetched_at/summary）
-├── latest.json                  # 指向最新一次结果的软链
-├── run.log                      # 每次运行记录（含失败原因）
-└── last-error.log               # 最近一次失败的错误详情
-```
-
-### 注意事项
-
-- AK/SK 是唯一能无人值守查询免费额度的凭证；浏览器授权（官方 `bl auth login --console` 流程）也可查询，但 token 会过期、需人工重新授权；
-- 不要把真实 AK/SK 提交到 Git 仓库；
-- `GenerateCLIAccessToken` 是控制台内部接口（未收录在公开 API 目录），本脚本复刻的是官方 CLI 的实现；如需完全文档化的路径，可安装官方 CLI 使用 `bl usage free`（详见 `status.md`）。
-
-## 额度看板（网页）
-
-`quota_dashboard.py` + `quota_dashboard.html`：本地起一个小服务，把免费额度归档 JSON 渲染成可搜索、筛选、排序的网页表格。
-
-```bash
-python3 quota_dashboard.py            # 默认 http://127.0.0.1:8377
-python3 quota_dashboard.py --port 9000 --open
-```
-
-- 数据读 `~/.local/share/bailian-quota/`（与 `run_free_quota.sh` 共用，`latest.json` 优先）。挂上 cron 每天抓取后，页面打开即是最新归档；
-- 页面右上角的「刷新」按钮会临时跑一次 `free_quota_lite.py --json` 并按同样约定归档，需要凭证：`~/.config/bailian-quota.env`（或 `BAILIAN_ENV_FILE` 指定的文件，或已导出的 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET` 环境变量）；
-- 服务只绑定 `127.0.0.1`，凭证只在服务端进程内使用，不会发送到浏览器；
-- 页面顶部显示快照时间并提示是否过期；「即将到期 / 已过期」按本机日期实时计算，统计条可直接点击筛选。
+查询**账户级**免费额度用本仓库的 `quota` 工具，见[免费额度 CLI](#免费额度-cliquota-fetch)。
 
 ## 相关 Python SDK API
 

@@ -1,6 +1,7 @@
 # 百炼免费额度抓取 — 状态
 
 > 更新：2026-10-16
+> 2026-10-27：项目已重写为 Go（`quota fetch` / `quota serve`，见 README），下文的 Python 脚本与 `run_free_quota.sh` 已删除；接口调研结论与测试记录仍然有效。
 
 ## 目标
 
