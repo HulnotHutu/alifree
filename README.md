@@ -121,8 +121,9 @@ JSON 输出结构（`--json`，与旧版 Python 工具的归档格式完全一�
 - 数据源是项目内的 SQLite 库 `data/quota.db`（`--db` / `BAILIAN_DB` 可改，WAL 模式）；
 - 首次打开库时，会把旧版 JSON 归档（`~/.local/share/bailian-quota/free-quota-*.json`）一次性迁入，旧文件保留不动；
 - 页面右上角的「刷新」按钮抓取一次并写入库，需要凭证（见下节）；
+- **可视化面板**（ECharts 5.6，已 vendor 进二进制、离线可用）：各类型剩余额度、到期时间分布、剩余比例分布、快照历史趋势（随 cron 每日抓取自然生长）；
 - 服务只绑定 `127.0.0.1`，凭证只在服务端进程内使用，不会发送到浏览器；
-- HTTP API：`GET /api/quota`（最新快照 JSON）、`POST /api/refresh`（抓取并入库）；
+- HTTP API：`GET /api/quota`（最新快照 JSON）、`GET /api/history`（抓取历史）、`POST /api/refresh`（抓取并入库）；
 - 页面顶部显示快照时间并提示是否过期；「即将到期 / 已过期」按本机日期实时计算，统计条可直接点击筛选。
 
 ## 准备凭证

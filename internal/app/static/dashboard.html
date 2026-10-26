@@ -168,6 +168,24 @@
   .rel.soon { color: var(--bad); font-weight: 550; }
   .rel.warn30 { color: var(--warn); }
 
+  /* ---- 图表区 ---- */
+  .chartHead {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 18px; padding-bottom: 8px;
+  }
+  .chartHead h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .charts {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+  }
+  .charts.collapsed { display: none; }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px 14px 6px; min-width: 0;
+  }
+  .chart-card h3 { margin: 0 0 2px; font-size: 13.5px; font-weight: 550; color: var(--muted); }
+  .chart { width: 100%; height: 300px; }
+  @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+
   /* ---- 空态 / 加载 / 页脚 ---- */
   .placeholder { padding: 56px 20px; text-align: center; color: var(--muted); }
   .placeholder .big { font-size: 15.5px; color: var(--ink); margin-bottom: 6px; }
@@ -220,6 +238,17 @@
     <span class="count" id="count"></span>
   </section>
 
+  <div class="chartHead" id="chartHead" hidden>
+    <h2>可视化</h2>
+    <button class="chip" id="toggleCharts" type="button" aria-pressed="true">收起图表</button>
+  </div>
+  <section class="charts" id="charts" hidden>
+    <div class="chart-card"><h3>各类型剩余额度</h3><div class="chart" id="chartType"></div></div>
+    <div class="chart-card"><h3>到期时间分布</h3><div class="chart" id="chartExpiry"></div></div>
+    <div class="chart-card"><h3>剩余比例分布</h3><div class="chart" id="chartRatio"></div></div>
+    <div class="chart-card"><h3>快照历史趋势</h3><div class="chart" id="chartHistory"></div></div>
+  </section>
+
   <div class="tableWrap" id="tableWrap" hidden>
     <table>
       <thead><tr>
@@ -244,6 +273,7 @@
 
 </div>
 
+<script src="/static/echarts.min.js"></script>
 <script>
 (() => {
   "use strict";
@@ -268,7 +298,7 @@
   const state = {
     data: null, meta: null, types: [],
     q: "", type: "全部", quick: "可用",
-    sortKey: "pct", sortDir: 1,
+    sortKey: "pct", sortDir: 1, chartsCollapsed: false,
   };
 
   // --- 数据整形 ------------------------------------------------------------
@@ -411,8 +441,9 @@
   }
 
   function renderAll() {
-    renderStats(); renderChips(); renderTable(); renderSortHeads();
+    renderStats(); renderChips(); renderTable(); renderSortHeads(); renderCharts();
     $("#stats").hidden = false; $("#toolbar").hidden = false;
+    $("#chartHead").hidden = false; $("#charts").hidden = state.chartsCollapsed;
   }
 
   function renderFreshness() {
@@ -438,6 +469,126 @@
       `数据库：${state.meta.db || "—"}` +
       (state.meta.snapshotId ? `（快照 #${state.meta.snapshotId}）` : "") +
       `；接口：/api/quota（JSON）、POST /api/refresh`;
+  }
+
+  // --- 图表 ------------------------------------------------------------------
+  const charts = {};
+  const AXIS = { color: "#5F6B7A" };
+  const SPLIT = { lineStyle: { color: "#EEF1F5" } };
+
+  function chart(id, opt) {
+    const el = document.getElementById(id);
+    if (!el || typeof echarts === "undefined") return;
+    if (!charts[id]) charts[id] = echarts.init(el);
+    charts[id].setOption({
+      animationDuration: 300,
+      textStyle: { fontFamily: "inherit" },
+      ...opt,
+    }, true);
+  }
+
+  function expiryBucket(r) {
+    if (r.days === null) return "长期/未知";
+    if (r.days < 0) return "已过期";
+    if (r.days <= 7) return "7 天内到期";
+    if (r.days <= 30) return "8–30 天";
+    if (r.days <= 90) return "31–90 天";
+    if (r.days > 730) return "长期有效";
+    return "90 天以上";
+  }
+
+  function renderCharts() {
+    const rows = state.data.models;
+    if (!rows || typeof echarts === "undefined") return;
+
+    // 1. 各类型剩余额度
+    const byType = {};
+    for (const r of rows) {
+      const t = r.type || "-";
+      byType[t] = byType[t] || { rem: 0, n: 0 };
+      byType[t].rem += r.remaining;
+      byType[t].n++;
+    }
+    const types = Object.keys(byType).sort((a, b) => byType[b].rem - byType[a].rem);
+    chart("chartType", {
+      grid: { left: 8, right: 16, top: 30, bottom: 0, containLabel: true },
+      tooltip: {
+        trigger: "axis",
+        formatter: ps => ps.map(p =>
+          `${p.name}：${fmtNum(p.value)}（${byType[p.name].n} 个模型）`).join("<br>"),
+      },
+      xAxis: { type: "category", data: types, axisLabel: { ...AXIS, interval: 0 }, axisLine: { lineStyle: { color: "#E3E7ED" } } },
+      yAxis: { type: "value", axisLabel: { ...AXIS, formatter: fmtNum }, splitLine: SPLIT },
+      series: [{
+        type: "bar", barMaxWidth: 42,
+        data: types.map(t => ({ value: Math.round(byType[t].rem), itemStyle: { color: TYPE_COLORS[t] || TYPE_COLORS["-"] } })),
+        label: { show: true, position: "top", color: AXIS.color, formatter: p => fmtNum(p.value) },
+      }],
+    });
+
+    // 2. 到期时间分布
+    const order = ["已过期", "7 天内到期", "8–30 天", "31–90 天", "90 天以上", "长期有效", "长期/未知"];
+    const colors = { "已过期": "#E5484D", "7 天内到期": "#E05200", "8–30 天": "#DD8E00",
+                     "31–90 天": "#2E90FA", "90 天以上": "#12B5A2", "长期有效": "#667085", "长期/未知": "#98A2B3" };
+    const counts = {};
+    for (const r of rows) counts[expiryBucket(r)] = (counts[expiryBucket(r)] || 0) + 1;
+    chart("chartExpiry", {
+      tooltip: { trigger: "item", formatter: "{b}：{c} 个（{d}%）" },
+      legend: { bottom: 0, textStyle: AXIS, itemWidth: 12, itemHeight: 8 },
+      series: [{
+        type: "pie", radius: ["42%", "68%"], center: ["50%", "44%"],
+        label: { show: true, formatter: "{b} {c}", color: AXIS.color },
+        labelLine: { lineStyle: { color: "#E3E7ED" } },
+        data: order.filter(k => counts[k]).map(k => ({
+          name: k, value: counts[k], itemStyle: { color: colors[k] },
+        })),
+      }],
+    });
+
+    // 3. 剩余比例分布
+    const bins = [["0–10%", 0, 10], ["10–25%", 10, 25], ["25–50%", 25, 50],
+                  ["50–75%", 50, 75], ["75–99%", 75, 100], ["100%（未使用）", 100, 101]];
+    const binCounts = bins.map(() => 0);
+    for (const r of rows) {
+      const p = r.pct;
+      let i = bins.findIndex(([, lo, hi]) => p >= lo && p < hi);
+      if (i < 0) i = bins.length - 1;
+      binCounts[i]++;
+    }
+    const binColors = ["#E5484D", "#E5484D", "#DD8E00", "#DD8E00", "#0E9F6E", "#0E9F6E"];
+    chart("chartRatio", {
+      grid: { left: 8, right: 16, top: 30, bottom: 0, containLabel: true },
+      tooltip: { trigger: "axis", formatter: ps => ps.map(p => `${p.name}：${p.value} 个模型`).join("<br>") },
+      xAxis: { type: "category", data: bins.map(b => b[0]), axisLabel: { ...AXIS, interval: 0 }, axisLine: { lineStyle: { color: "#E3E7ED" } } },
+      yAxis: { type: "value", minInterval: 1, axisLabel: AXIS, splitLine: SPLIT },
+      series: [{
+        type: "bar", barMaxWidth: 42,
+        data: binCounts.map((v, i) => ({ value: v, itemStyle: { color: binColors[i] } })),
+        label: { show: true, position: "top", color: AXIS.color },
+      }],
+    });
+
+    // 4. 快照历史趋势
+    fetch("/api/history").then(r => r.json()).then(runs => {
+      if (!Array.isArray(runs) || !runs.length) return;
+      const asc = [...runs].sort((a, b) => a.id - b.id);
+      chart("chartHistory", {
+        grid: { left: 8, right: 16, top: 36, bottom: 0, containLabel: true },
+        tooltip: { trigger: "axis" },
+        legend: { top: 0, textStyle: AXIS, itemWidth: 14, itemHeight: 8 },
+        xAxis: { type: "category", boundaryGap: false,
+                 data: asc.map(r => r.fetchedAt.slice(0, 16).replace("T", " ")),
+                 axisLabel: { ...AXIS, hideOverlap: true }, axisLine: { lineStyle: { color: "#E3E7ED" } } },
+        yAxis: { type: "value", axisLabel: AXIS, splitLine: SPLIT },
+        series: [
+          { name: "有额度模型", type: "line", smooth: true, symbolSize: 6,
+            data: asc.map(r => r.withQuota), itemStyle: { color: "#E05200" },
+            areaStyle: { color: "rgba(224,82,0,.08)" } },
+          { name: "查询到的模型总数", type: "line", smooth: true, symbolSize: 6,
+            data: asc.map(r => r.totalModels), itemStyle: { color: "#2E90FA" }, lineStyle: { type: "dashed" } },
+        ],
+      });
+    }).catch(() => {});
   }
 
   // --- 交互 ----------------------------------------------------------------
@@ -475,6 +626,19 @@
     $("#search").value = "";
     renderAll();
   });
+
+  $("#toggleCharts").addEventListener("click", e => {
+    state.chartsCollapsed = !state.chartsCollapsed;
+    e.target.textContent = state.chartsCollapsed ? "展开图表" : "收起图表";
+    e.target.setAttribute("aria-pressed", String(!state.chartsCollapsed));
+    $("#charts").classList.toggle("collapsed", state.chartsCollapsed);
+    if (!state.chartsCollapsed) {
+      // 从 display:none 恢复后 ECharts 需要重新测量
+      Object.values(charts).forEach(c => c.resize());
+    }
+  });
+
+  window.addEventListener("resize", () => Object.values(charts).forEach(c => c.resize()));
 
   $("#refreshBtn").addEventListener("click", async () => {
     const btn = $("#refreshBtn");

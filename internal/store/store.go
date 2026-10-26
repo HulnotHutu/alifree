@@ -178,10 +178,10 @@ func (s *Store) Latest() (int64, *bailian.Snapshot, error) {
 
 // RunInfo 是一次抓取的摘要记录。
 type RunInfo struct {
-	ID          int64
-	FetchedAt   string
-	TotalModels int
-	WithQuota   int
+	ID          int64  `json:"id"`
+	FetchedAt   string `json:"fetchedAt"`
+	TotalModels int    `json:"totalModels"`
+	WithQuota   int    `json:"withQuota"`
 }
 
 // History 返回最近 limit 次抓取记录（新的在前）。

@@ -84,9 +84,30 @@ type server struct {
 func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handlePage)
+	mux.HandleFunc("GET /static/echarts.min.js", s.handleEcharts)
 	mux.HandleFunc("GET /api/quota", s.handleQuota)
+	mux.HandleFunc("GET /api/history", s.handleHistory)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	return mux
+}
+
+func (s *server) handleEcharts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write(echartsJS())
+}
+
+// handleHistory 返回最近抓取记录，供历史趋势图使用。
+func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.store.History(200)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if runs == nil {
+		runs = []store.RunInfo{}
+	}
+	writeJSON(w, http.StatusOK, runs)
 }
 
 func (s *server) handlePage(w http.ResponseWriter, r *http.Request) {
