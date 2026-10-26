@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>百炼免费额度</title>
+<style>
+  :root {
+    --bg: #F5F6F8;
+    --surface: #FFFFFF;
+    --ink: #1A2230;
+    --muted: #5F6B7A;
+    --faint: #98A2B3;
+    --line: #E3E7ED;
+    --line-soft: #EEF1F5;
+    --accent: #E05200;       /* 百炼橙，只用于交互与选中态 */
+    --accent-ink: #B54100;
+    --accent-tint: #FDEDE2;
+    --ok: #0E9F6E;
+    --warn: #DD8E00;
+    --bad: #E5484D;
+    --bad-tint: #FDECEC;
+    --warn-tint: #FFF7E0;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 -apple-system, "Segoe UI", "Noto Sans SC", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+  }
+  .mono, td.mono, .pctx {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas,
+                 "Noto Sans Mono", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px 32px; }
+
+  /* ---- 头部 ---- */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap; padding: 18px 0 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .mark { width: 11px; height: 11px; border-radius: 2px; background: var(--accent); }
+  h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: .01em; }
+  .fresh { display: flex; align-items: center; gap: 12px; }
+  .freshness { font-size: 13px; color: var(--muted); }
+  .freshness.stale { color: var(--accent-ink); font-weight: 550; }
+
+  button { font: inherit; color: inherit; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 7px 16px; font-size: 14px; font-weight: 550; cursor: pointer;
+  }
+  .btn:hover { background: #C94A00; }
+  .btn:disabled { opacity: .6; cursor: default; }
+  .btn .spin {
+    width: 13px; height: 13px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.45); border-top-color: #fff;
+    display: none;
+  }
+  .btn.loading .spin { display: inline-block; animation: turn .8s linear infinite; }
+  @keyframes turn { to { transform: rotate(360deg); } }
+
+  :is(button, input):focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+
+  /* ---- 横幅 ---- */
+  .banner {
+    margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 13.5px;
+  }
+  .banner.warn  { background: var(--warn-tint); border: 1px solid #F0DFA8; color: #7A5B00; }
+  .banner.error { background: var(--bad-tint);  border: 1px solid #F5C2C2; color: #A03030; }
+  .banner code {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12.5px;
+    background: rgba(0,0,0,.05); border-radius: 4px; padding: 1px 5px;
+  }
+
+  /* ---- 统计条（可点筛选） ---- */
+  .stats { display: flex; flex-wrap: wrap; padding: 6px 0 2px; }
+  .stat {
+    background: none; border: 0; text-align: left; cursor: pointer;
+    padding: 12px 28px 10px 0; margin-right: 28px;
+    border-bottom: 2px solid transparent;
+  }
+  .stat + .stat { border-left: 1px solid var(--line); padding-left: 28px; }
+  .stat b {
+    display: block; font-size: 26px; font-weight: 650; line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat span { font-size: 12.5px; color: var(--muted); }
+  .stat[aria-pressed="true"] { border-bottom-color: var(--accent); }
+  .stat[aria-pressed="true"] span { color: var(--accent-ink); }
+  .stat.warn-count b { color: var(--warn); }
+  .stat.bad-count b  { color: var(--bad); }
+
+  /* ---- 工具条 ---- */
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin: 14px 0 10px;
+  }
+  #search {
+    width: 230px; padding: 7px 11px; font: inherit; font-size: 14px;
+    color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  #search::placeholder { color: var(--faint); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+    padding: 3.5px 12px; font-size: 13px; color: var(--muted); cursor: pointer;
+  }
+  .chip:hover { border-color: var(--faint); color: var(--ink); }
+  .chip[aria-pressed="true"] {
+    background: var(--accent-tint); border-color: var(--accent);
+    color: var(--accent-ink); font-weight: 550;
+  }
+  .chip small { color: inherit; opacity: .65; font-size: 11.5px; margin-left: 3px; }
+  .count { margin-left: auto; font-size: 13px; color: var(--muted); }
+
+  /* ---- 表格 ---- */
+  .tableWrap { overflow-x: auto; background: var(--surface);
+               border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; min-width: 780px; border-collapse: collapse; }
+  thead th {
+    text-align: left; font-size: 12.5px; font-weight: 550; color: var(--muted);
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+    white-space: nowrap; user-select: none;
+  }
+  th.num, td.num { text-align: right; }
+  th.sortable { cursor: pointer; }
+  th.sortable:hover { color: var(--ink); }
+  th.sortable::after { content: "↕"; margin-left: 5px; color: var(--faint); font-size: 11px; }
+  th.sort-asc  { color: var(--accent-ink); }
+  th.sort-asc::after  { content: "↑"; color: var(--accent-ink); }
+  th.sort-desc { color: var(--accent-ink); }
+  th.sort-desc::after { content: "↓"; color: var(--accent-ink); }
+
+  tbody td { padding: 9px 14px; border-bottom: 1px solid var(--line-soft); font-size: 14px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.model { font-size: 13px; }
+  tr.expired td { color: var(--faint); }
+  tr.expired td.model { text-decoration: none; }
+
+  .type { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c, #98A2B3); }
+
+  td.num { font-size: 13px; white-space: nowrap; }
+  td.num.dim { color: var(--muted); }
+
+  .pct { display: flex; align-items: center; gap: 9px; }
+  .bar { flex: 0 0 130px; height: 6px; border-radius: 3px; background: #E9EDF2; overflow: hidden; }
+  .fill { display: block; height: 100%; border-radius: 3px; }
+  .fill.ok   { background: var(--ok); }
+  .fill.warn { background: var(--warn); }
+  .fill.bad  { background: var(--bad); }
+  .fill.dead { background: var(--faint); }
+  .pctx { font-size: 12.5px; color: var(--muted); min-width: 46px; text-align: right; }
+
+  td.expiry { white-space: nowrap; font-size: 13.5px; }
+  .rel { margin-left: 7px; font-size: 12.5px; color: var(--muted); }
+  .rel.soon { color: var(--bad); font-weight: 550; }
+  .rel.warn30 { color: var(--warn); }
+
+  /* ---- 空态 / 加载 / 页脚 ---- */
+  .placeholder { padding: 56px 20px; text-align: center; color: var(--muted); }
+  .placeholder .big { font-size: 15.5px; color: var(--ink); margin-bottom: 6px; }
+  .placeholder button {
+    background: none; border: 0; color: var(--accent-ink); cursor: pointer;
+    padding: 0; font-size: inherit; text-decoration: underline; text-underline-offset: 3px;
+  }
+  footer {
+    margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line);
+    font-size: 12.5px; color: var(--faint); line-height: 1.8;
+  }
+  footer code {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 11.5px;
+  }
+
+  @media (max-width: 720px) {
+    .stat { padding-right: 18px; margin-right: 18px; }
+    .stat + .stat { padding-left: 18px; }
+    .stat b { font-size: 22px; }
+    .count { flex-basis: 100%; margin-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .btn.loading .spin { animation: none; border-top-color: rgba(255,255,255,.9); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <h1>百炼免费额度</h1>
+    </div>
+    <div class="fresh">
+      <span class="freshness" id="freshness">加载中…</span>
+      <button class="btn" id="refreshBtn" type="button">
+        <span class="spin" aria-hidden="true"></span>刷新
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="status" hidden></div>
+
+  <section class="stats" id="stats" hidden></section>
+
+  <section class="toolbar" hidden id="toolbar">
+    <input id="search" type="search" placeholder="搜索模型…" aria-label="搜索模型">
+    <div class="chips" id="chips" role="group" aria-label="按类型筛选"></div>
+    <span class="count" id="count"></span>
+  </section>
+
+  <div class="tableWrap" id="tableWrap" hidden>
+    <table>
+      <thead><tr>
+        <th class="sortable" data-key="model" scope="col">模型</th>
+        <th scope="col">类型</th>
+        <th class="sortable num" data-key="remaining" scope="col">剩余</th>
+        <th class="sortable num" data-key="total" scope="col">总量</th>
+        <th class="sortable" data-key="pct" scope="col">剩余比例</th>
+        <th class="sortable" data-key="days" scope="col">到期</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="placeholder" id="placeholder">加载中…</div>
+
+  <footer>
+    <div>数值为抓取时点的快照，到期日按本机时间计算。</div>
+    <div id="footMeta">数据文件：—</div>
+    <div>刷新需要 <code>~/.config/bailian-quota.env</code> 中的阿里云 AK/SK（见 README「免费额度查询」）。</div>
+  </footer>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  const TYPE_COLORS = {
+    "Text": "#2E90FA", "Vision": "#875BF7", "Audio": "#EE46BC",
+    "Embedding": "#12B5A2", "Multimodal": "#F79009", "-": "#98A2B3",
+  };
+  const TYPE_LABEL = { "-": "其他" };
+  const typeLabel = t => TYPE_LABEL[t] || t;
+  const QUICK = {
+    "可用":   r => !r.expired,
+    "即将到期": r => !r.expired && r.days !== null && r.days <= 7,
+    "已过期": r => r.expired,
+    "全部":   () => true,
+  };
+  const DEFAULT_SORT = { model: 1, remaining: -1, total: -1, pct: 1, days: 1 };
+
+  const state = {
+    data: null, meta: null, types: [],
+    q: "", type: "全部", quick: "可用",
+    sortKey: "pct", sortDir: 1,
+  };
+
+  // --- 数据整形 ------------------------------------------------------------
+  function derive(rows) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    for (const r of rows) {
+      r.remaining = Number(r.remaining) || 0;
+      r.total = Number(r.total) || 0;
+      r.pct = (typeof r.remainingPercent === "number")
+        ? r.remainingPercent
+        : (r.total ? r.remaining / r.total * 100 : 0);
+      r.days = null;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(r.expires || "")) {
+        const [y, m, d] = r.expires.split("-").map(Number);
+        r.days = Math.round((new Date(y, m - 1, d) - today) / 864e5);
+      }
+      r.expired = r.days !== null && r.days < 0;
+    }
+    const byType = {};
+    for (const r of rows) byType[r.type || "-"] = (byType[r.type || "-"] || 0) + 1;
+    state.types = Object.keys(byType)
+      .sort((a, b) => byType[b] - byType[a] || a.localeCompare(b));
+  }
+
+  function fmtNum(v) {
+    v = Math.round(Number(v) || 0);
+    if (v >= 1e6 && v % 1e5 === 0) return (v / 1e6) + "M";
+    if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+    return String(v);
+  }
+
+  // --- 渲染 ----------------------------------------------------------------
+  function showBanner(kind, html) {
+    const el = $("#banner");
+    el.hidden = !kind;
+    if (kind) { el.className = "banner " + kind; el.innerHTML = html; }
+  }
+
+  function renderStats() {
+    const rows = state.data.models;
+    const counts = {
+      "可用":   rows.filter(QUICK["可用"]).length,
+      "即将到期": rows.filter(QUICK["即将到期"]).length,
+      "已过期": rows.filter(QUICK["已过期"]).length,
+      "全部":   rows.length,
+    };
+    $("#stats").innerHTML = Object.entries(counts).map(([k, n]) => `
+      <button class="stat ${k === "即将到期" ? "warn-count" : ""}${k === "已过期" ? " bad-count" : ""}"
+              type="button" data-quick="${k}" aria-pressed="${state.quick === k}">
+        <b>${n}</b><span>${k}</span>
+      </button>`).join("");
+  }
+
+  function renderChips() {
+    const all = ["全部", ...state.types];
+    $("#chips").innerHTML = all.map(t => {
+      const n = t === "全部" ? state.data.models.length
+        : state.data.models.filter(r => (r.type || "-") === t).length;
+      return `<button class="chip" type="button" data-type="${esc(t)}"
+                aria-pressed="${state.type === t}">${esc(typeLabel(t))}<small>${n}</small></button>`;
+    }).join("");
+  }
+
+  function barClass(r) {
+    if (r.expired) return "dead";
+    if (r.pct >= 50) return "ok";
+    if (r.pct >= 20) return "warn";
+    return "bad";
+  }
+
+  function expiryHtml(r) {
+    if (r.days === null) return `<span class="rel">—</span>`;
+    if (r.days > 730) return `${esc(r.expires)}<span class="rel">长期有效</span>`;
+    if (r.expired) return `<span class="rel soon">已过期 ${-r.days} 天</span>`;
+    let rel, cls = "";
+    if (r.days === 0) { rel = "今天到期"; cls = "soon"; }
+    else if (r.days === 1) { rel = "明天到期"; cls = "soon"; }
+    else {
+      rel = `${r.days} 天后`;
+      cls = r.days <= 7 ? "soon" : (r.days <= 30 ? "warn30" : "");
+    }
+    return `${esc(r.expires)}<span class="rel ${cls}">${rel}</span>`;
+  }
+
+  function currentRows() {
+    const q = state.q, f = QUICK[state.quick];
+    const rows = state.data.models.filter(r =>
+      f(r) && (state.type === "全部" || (r.type || "-") === state.type) &&
+      (!q || r.model.toLowerCase().includes(q)));
+    const val = {
+      model: r => r.model,
+      remaining: r => r.remaining,
+      total: r => r.total,
+      pct: r => r.pct,
+      days: r => r.expired ? 1e9 : (r.days === null ? 1e8 : r.days),
+    };
+    const k = state.sortKey, d = state.sortDir;
+    rows.sort((a, b) => {
+      const va = val[k](a), vb = val[k](b);
+      const c = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+      return (c * d) || a.model.localeCompare(b.model);
+    });
+    return rows;
+  }
+
+  function renderTable() {
+    const rows = currentRows();
+    $("#rows").innerHTML = rows.map(r => `
+      <tr class="${r.expired ? "expired" : ""}">
+        <td class="mono model">${esc(r.model)}</td>
+        <td><span class="type"><i class="dot" style="--c:${TYPE_COLORS[r.type || "-"] || TYPE_COLORS["-"]}"></i>${esc(typeLabel(r.type || "-"))}</span></td>
+        <td class="num mono">${fmtNum(r.remaining)}</td>
+        <td class="num mono dim">${fmtNum(r.total)}</td>
+        <td><div class="pct">
+          <span class="bar"><span class="fill ${barClass(r)}" style="width:${Math.min(Math.max(r.pct, 0), 100)}%"></span></span>
+          <span class="pctx">${r.pct.toFixed(1)}%</span>
+        </div></td>
+        <td class="expiry">${expiryHtml(r)}</td>
+      </tr>`).join("");
+    $("#count").textContent = `显示 ${rows.length} / ${state.data.models.length} 个模型`;
+    $("#tableWrap").hidden = rows.length === 0;
+    $("#placeholder").hidden = rows.length > 0;
+    if (rows.length === 0) {
+      $("#placeholder").innerHTML =
+        `<div class="big">没有匹配的模型</div>
+         <div>换个关键词，或 <button type="button" id="clearBtn">清除筛选</button></div>`;
+    }
+  }
+
+  function renderSortHeads() {
+    document.querySelectorAll("th.sortable").forEach(th => {
+      th.classList.remove("sort-asc", "sort-desc");
+      th.removeAttribute("aria-sort");
+      if (th.dataset.key === state.sortKey) {
+        const cls = state.sortDir === 1 ? "sort-asc" : "sort-desc";
+        th.classList.add(cls);
+        th.setAttribute("aria-sort", state.sortDir === 1 ? "ascending" : "descending");
+      }
+    });
+  }
+
+  function renderAll() {
+    renderStats(); renderChips(); renderTable(); renderSortHeads();
+    $("#stats").hidden = false; $("#toolbar").hidden = false;
+  }
+
+  function renderFreshness() {
+    if (!state.meta) return;
+    const el = $("#freshness");
+    const age = state.meta.ageHours;
+    const when = (state.data.fetched_at || "").slice(0, 16).replace("T", " ");
+    let label = "";
+    if (typeof age === "number") {
+      label = age < 1 ? "刚刚更新"
+        : age < 24 ? `${Math.round(age)} 小时前`
+        : `${Math.round(age / 24)} 天前`;
+      label = `（${label}）`;
+    }
+    el.textContent = `快照：${when}${label}`;
+    el.classList.toggle("stale", typeof age === "number" && age >= 48);
+    if (typeof age === "number" && age >= 48) {
+      showBanner("warn",
+        `快照已 ${Math.round(age / 24)} 天未更新，数值可能过期。` +
+        `配置 <code>~/.config/bailian-quota.env</code> 后可点右上角刷新。`);
+    }
+    $("#footMeta").textContent =
+      `数据文件：${state.meta.file || "—"}；接口：/api/quota（JSON）、POST /api/refresh`;
+  }
+
+  // --- 交互 ----------------------------------------------------------------
+  $("#stats").addEventListener("click", e => {
+    const btn = e.target.closest("[data-quick]");
+    if (!btn) return;
+    state.quick = btn.dataset.quick;
+    renderStats(); renderTable();
+  });
+
+  $("#chips").addEventListener("click", e => {
+    const btn = e.target.closest("[data-type]");
+    if (!btn) return;
+    state.type = btn.dataset.type;
+    renderChips(); renderTable();
+  });
+
+  $("#search").addEventListener("input", e => {
+    state.q = e.target.value.trim().toLowerCase();
+    renderTable();
+  });
+
+  document.querySelector("thead").addEventListener("click", e => {
+    const th = e.target.closest("th.sortable");
+    if (!th) return;
+    const key = th.dataset.key;
+    if (state.sortKey === key) state.sortDir = -state.sortDir;
+    else { state.sortKey = key; state.sortDir = DEFAULT_SORT[key] || 1; }
+    renderSortHeads(); renderTable();
+  });
+
+  $("#placeholder").addEventListener("click", e => {
+    if (e.target.id !== "clearBtn") return;
+    state.q = ""; state.type = "全部"; state.quick = "可用";
+    $("#search").value = "";
+    renderAll();
+  });
+
+  $("#refreshBtn").addEventListener("click", async () => {
+    const btn = $("#refreshBtn");
+    btn.disabled = true; btn.classList.add("loading");
+    try {
+      const res = await fetch("/api/refresh", { method: "POST" });
+      const out = await res.json();
+      if (out.ok) {
+        state.data = out.data; state.meta = out.meta;
+        derive(state.data.models);
+        renderAll(); renderFreshness();
+        showBanner(null);
+      } else {
+        showBanner("error", esc(out.error || "刷新失败"));
+      }
+    } catch (err) {
+      showBanner("error", "刷新请求失败：" + esc(err.message));
+    } finally {
+      btn.disabled = false; btn.classList.remove("loading");
+    }
+  });
+
+  // --- 启动 ----------------------------------------------------------------
+  (async () => {
+    try {
+      const res = await fetch("/api/quota");
+      const out = await res.json();
+      if (!out.ok) {
+        $("#freshness").textContent = "无数据";
+        $("#placeholder").innerHTML =
+          `<div class="big">还没有可展示的额度数据</div><div>${esc(out.error || "")}</div>`;
+        return;
+      }
+      state.data = out.data; state.meta = out.meta;
+      derive(state.data.models);
+      renderAll(); renderFreshness();
+    } catch (err) {
+      $("#placeholder").innerHTML =
+        `<div class="big">加载失败</div><div>${esc(err.message)}</div>`;
+    }
+  })();
+})();
+</script>
+</body>
+</html>
