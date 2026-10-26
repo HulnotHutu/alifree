@@ -22,7 +22,7 @@ func newServeCmd() *cobra.Command {
 	var (
 		host    string
 		port    int
-		dataDir string
+		dbPath  string
 		envFile string
 		open    bool
 	)
@@ -32,7 +32,13 @@ func newServeCmd() *cobra.Command {
 		Example: `  quota serve                 # http://127.0.0.1:8377
   quota serve --port 9000 --open`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			srv := newServer(dataDir, envFile)
+			st, err := store.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			srv := &server{store: st, envFile: envFile}
+
 			addr := host + ":" + fmt.Sprint(port)
 			httpSrv := &http.Server{
 				Addr:              addr,
@@ -46,7 +52,7 @@ func newServeCmd() *cobra.Command {
 			go func() { errCh <- httpSrv.ListenAndServe() }()
 
 			url := "http://" + addr + "/"
-			fmt.Fprintf(cmd.ErrOrStderr(), "额度看板：%s（数据目录 %s，Ctrl+C 退出）\n", url, dataDir)
+			fmt.Fprintf(cmd.ErrOrStderr(), "额度看板：%s（数据库 %s，Ctrl+C 退出）\n", url, dbPath)
 			if open {
 				_ = exec.Command("xdg-open", url).Start()
 			}
@@ -63,7 +69,7 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "监听地址（默认只绑定本机）")
 	cmd.Flags().IntVar(&port, "port", 8377, "监听端口")
-	cmd.Flags().StringVar(&dataDir, "data-dir", DefaultDataDir(), "归档目录")
+	cmd.Flags().StringVar(&dbPath, "db", DefaultDBPath(), "SQLite 库文件路径")
 	cmd.Flags().StringVar(&envFile, "env-file", DefaultEnvFile(), "AK/SK 凭证文件")
 	cmd.Flags().BoolVar(&open, "open", false, "启动后打开浏览器")
 	return cmd
@@ -73,10 +79,6 @@ func newServeCmd() *cobra.Command {
 type server struct {
 	store   *store.Store
 	envFile string
-}
-
-func newServer(dataDir, envFile string) *server {
-	return &server{store: store.New(dataDir), envFile: envFile}
 }
 
 func (s *server) mux() http.Handler {
@@ -97,7 +99,7 @@ func (s *server) handlePage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(dashboardHTML())
 }
 
-// apiEnvelope 与旧版 Python 看板的 JSON 契约保持一致。
+// apiEnvelope 与看板前端的 JSON 契约。
 type apiEnvelope struct {
 	OK    bool              `json:"ok"`
 	Error string            `json:"error,omitempty"`
@@ -106,23 +108,24 @@ type apiEnvelope struct {
 }
 
 type apiMeta struct {
-	File        string   `json:"file,omitempty"`
+	DB          string   `json:"db"`
+	SnapshotID  int64    `json:"snapshotId,omitempty"`
 	AgeHours    *float64 `json:"ageHours,omitempty"`
 	Credentials bool     `json:"credentials"`
 }
 
 func (s *server) handleQuota(w http.ResponseWriter, r *http.Request) {
-	path, snap, err := s.store.Latest()
-	meta := &apiMeta{Credentials: LoadCredentials(s.envFile).Complete()}
+	meta := &apiMeta{DB: s.store.DBPath, Credentials: LoadCredentials(s.envFile).Complete()}
+	id, snap, err := s.store.Latest()
 	if err != nil {
 		writeJSON(w, http.StatusOK, apiEnvelope{
 			OK:    false,
-			Error: err.Error() + "。先运行 `quota fetch --archive` 抓取一次，或配置凭证后在页面里刷新。",
+			Error: err.Error() + "。先运行 `quota fetch --save` 抓取一次，或配置凭证后在页面里刷新。",
 			Meta:  meta,
 		})
 		return
 	}
-	meta.File = path
+	meta.SnapshotID = id
 	if age, ok := ageHours(snap.FetchedAt); ok {
 		meta.AgeHours = &age
 	}
@@ -135,7 +138,7 @@ func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, apiEnvelope{
 			OK:    false,
 			Error: fmt.Sprintf("缺少凭证，无法刷新。请在 %s 写入 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET（见 README），重启本服务后再试。", s.envFile),
-			Meta:  &apiMeta{Credentials: false},
+			Meta:  &apiMeta{DB: s.store.DBPath, Credentials: false},
 		})
 		return
 	}
@@ -147,20 +150,20 @@ func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, apiEnvelope{
 			OK:    false,
 			Error: "抓取失败：" + err.Error(),
-			Meta:  &apiMeta{Credentials: true},
+			Meta:  &apiMeta{DB: s.store.DBPath, Credentials: true},
 		})
 		return
 	}
-	path, err := s.store.Save(snap)
+	id, err := s.store.Save(snap)
 	if err != nil {
-		writeJSON(w, http.StatusOK, apiEnvelope{OK: false, Error: "归档失败：" + err.Error()})
+		writeJSON(w, http.StatusOK, apiEnvelope{OK: false, Error: "保存失败：" + err.Error()})
 		return
 	}
 	zero := 0.0
 	writeJSON(w, http.StatusOK, apiEnvelope{
 		OK:   true,
 		Data: snap,
-		Meta: &apiMeta{File: path, AgeHours: &zero, Credentials: true},
+		Meta: &apiMeta{DB: s.store.DBPath, SnapshotID: id, AgeHours: &zero, Credentials: true},
 	})
 }
 
@@ -179,7 +182,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = encodeJSON(w, v)
 }
 
-// encodeJSON 输出缩进、非 HTML 转义的 JSON（与旧版 Python 的 json.dumps 一致）。
+// encodeJSON 输出缩进、非 HTML 转义的 JSON。
 func encodeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)

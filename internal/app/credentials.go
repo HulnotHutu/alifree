@@ -15,11 +15,13 @@ func DefaultEnvFile() string {
 	return filepath.Join(home(), ".config", "bailian-quota.env")
 }
 
-func DefaultDataDir() string {
-	if v := os.Getenv("BAILIAN_OUT_DIR"); v != "" {
+// DefaultDBPath 返回默认 SQLite 路径：项目内 data/quota.db（相对当前目录，
+// 可用 --db 覆盖，或设 BAILIAN_DB）。
+func DefaultDBPath() string {
+	if v := os.Getenv("BAILIAN_DB"); v != "" {
 		return v
 	}
-	return filepath.Join(home(), ".local", "share", "bailian-quota")
+	return filepath.Join("data", "quota.db")
 }
 
 func home() string {

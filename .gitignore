@@ -1,6 +1,12 @@
 # Go 构建产物
 /bin/
 
+# 本地数据（SQLite 看板库，运行时生成）
+/data/
+*.db
+*.db-wal
+*.db-shm
+
 # 本地工具状态
 /.workbuddy/
 /.zcode/

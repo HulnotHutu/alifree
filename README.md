@@ -33,12 +33,13 @@ Go 实现的工具集：**百炼免费额度 CLI 与本地看板**，以及通�
 
 ```text
 dashscope-call/
-├── cmd/quota/            # 入口：quota fetch / quota serve
+├── cmd/quota/            # 入口：quota fetch / serve / history
 ├── internal/
 │   ├── bailian/          # ACS3 签名、CLI token、控制台网关、额度快照
-│   ├── store/            # 归档目录读写（free-quota-*.json / latest.json / run.log）
+│   ├── store/            # SQLite 存储（snapshots + model_quotas 两表）
 │   ├── format/           # K/M 数字与到期日格式化
 │   └── app/              # cobra 命令、HTTP 看板服务、内嵌页面
+├── data/                 # SQLite 库（运行时生成，已 gitignore）
 ├── ROUTE.md              # DashScope API 路由调研
 ├── status.md             # 免费额度接口调研记录（含网页版 cookie 路线）
 └── Makefile
@@ -61,8 +62,9 @@ make vet fmt   # 静态检查与格式化
 ```bash
 ./bin/quota fetch            # 文本表格，按剩余比例升序（最紧张在前）
 ./bin/quota fetch --json     # JSON 输出
-./bin/quota fetch --archive  # 归档到数据目录并更新 latest.json（cron 用）
+./bin/quota fetch --save     # 保存到 SQLite 库（cron / 看板刷新用）
 ./bin/quota fetch --ak <ID> --sk <Secret>   # 也可直接传参（不推荐，会进 shell 历史）
+./bin/quota history          # 查看最近的抓取记录
 ```
 
 文本输出示例：
@@ -109,17 +111,18 @@ JSON 输出结构（`--json`，与旧版 Python 工具的归档格式完全一�
 
 ## 额度看板（quota serve）
 
-本地起一个小服务，把免费额度归档 JSON 渲染成可搜索、筛选、排序的网页表格：
+本地起一个小服务，把 SQLite 里的最新额度快照渲染成可搜索、筛选、排序的网页表格：
 
 ```bash
 ./bin/quota serve            # 默认 http://127.0.0.1:8377
 ./bin/quota serve --port 9000 --open
 ```
 
-- 数据读 `~/.local/share/bailian-quota/`（`latest.json` 优先），与 `quota fetch --archive` 共用；
-- 页面右上角的「刷新」按钮临时执行一次抓取并归档，需要凭证（见下节）；
+- 数据源是项目内的 SQLite 库 `data/quota.db`（`--db` / `BAILIAN_DB` 可改，WAL 模式）；
+- 首次打开库时，会把旧版 JSON 归档（`~/.local/share/bailian-quota/free-quota-*.json`）一次性迁入，旧文件保留不动；
+- 页面右上角的「刷新」按钮抓取一次并写入库，需要凭证（见下节）；
 - 服务只绑定 `127.0.0.1`，凭证只在服务端进程内使用，不会发送到浏览器；
-- HTTP API：`GET /api/quota`（JSON 快照）、`POST /api/refresh`（刷新并归档）；
+- HTTP API：`GET /api/quota`（最新快照 JSON）、`POST /api/refresh`（抓取并入库）；
 - 页面顶部显示快照时间并提示是否过期；「即将到期 / 已过期」按本机日期实时计算，统计条可直接点击筛选。
 
 ## 准备凭证
@@ -140,17 +143,16 @@ chmod 600 ~/.config/bailian-quota.env
 ## 定时抓取（cron）
 
 ```bash
-( crontab -l; echo "15 9 * * * $HOME/note-space/dashscope-call/bin/quota fetch --archive" ) | crontab -
+( crontab -l; echo "15 9 * * * cd $HOME/note-space/dashscope-call && ./bin/quota fetch --save" ) | crontab -
 ```
 
-输出目录结构（`BAILIAN_OUT_DIR` 可覆盖）：
+数据落在 `data/quota.db`（含 `-wal` / `-shm` 两个 WAL 伴生文件），每次抓取新增一份快照，历史可用 `quota history` 或直接 SQL 查询：
 
-```text
-~/.local/share/bailian-quota/
-├── free-quota-2026-10-17.json   # 每日完整 JSON（含 fetched_at/summary）
-├── latest.json                  # 指向最新一次结果的软链
-└── run.log                      # 每次运行记录
+```sql
+sqlite3 data/quota.db 'SELECT id, fetched_at, with_quota FROM snapshots ORDER BY id DESC LIMIT 5;'
 ```
+
+旧版 JSON 归档目录 `~/.local/share/bailian-quota/` 仅作为迁移来源，迁移完成后可自行处理。
 
 ### 注意事项
 

@@ -238,7 +238,7 @@
 
   <footer>
     <div>数值为抓取时点的快照，到期日按本机时间计算。</div>
-    <div id="footMeta">数据文件：—</div>
+    <div id="footMeta">数据库：—</div>
     <div>刷新需要 <code>~/.config/bailian-quota.env</code> 中的阿里云 AK/SK（见 README「免费额度查询」）。</div>
   </footer>
 
@@ -435,7 +435,9 @@
         `配置 <code>~/.config/bailian-quota.env</code> 后可点右上角刷新。`);
     }
     $("#footMeta").textContent =
-      `数据文件：${state.meta.file || "—"}；接口：/api/quota（JSON）、POST /api/refresh`;
+      `数据库：${state.meta.db || "—"}` +
+      (state.meta.snapshotId ? `（快照 #${state.meta.snapshotId}）` : "") +
+      `；接口：/api/quota（JSON）、POST /api/refresh`;
   }
 
   // --- 交互 ----------------------------------------------------------------
