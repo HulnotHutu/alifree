@@ -3,7 +3,8 @@
 
 只回答一件事：当前账号有哪些模型有免费额度、还剩多少、何时到期。
 
-链路（从官方 bailian-cli v2.3.1 源码逐行裁减，见 ./cli）：
+链路（从官方 bailian-cli v2.3.1 源码逐行裁减，
+https://github.com/modelstudioai/cli ）：
   1. 用 AK/SK 做 ACS3-HMAC-SHA256 签名，调 OpenAPI GenerateCLIAccessToken 换 CLI token
   2. 匿名调 listFoundationModels 拿模型清单（已实测：无需登录）
   3. 带 Bearer token 调 queryFreeTierQuota 拿额度，过滤出有额度的（VALID）

@@ -1,9 +1,6 @@
-# 第三方参考源码：官方 bailian-cli 克隆（自带 .git，不纳入本仓库）
-# 重新获取：git clone git@github.com:modelstudioai/cli.git cli
-/cli/
-
 # 本地工具状态
 /.workbuddy/
+/.zcode/
 
 # Python
 __pycache__/

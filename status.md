@@ -34,7 +34,7 @@ python3 free_quota_lite.py          # 文本表格（按剩余比例升序，最
 python3 free_quota_lite.py --json   # JSON 输出
 ```
 
-链路（从官方 bailian-cli v2.3.1 源码逐行裁减，`./cli`）：
+链路（从官方 bailian-cli v2.3.1 源码逐行裁减，https://github.com/modelstudioai/cli ）：
 
 1. AK/SK → ACS3-HMAC-SHA256 签名 → OpenAPI `GenerateCLIAccessToken`（`modelstudio.cn-beijing.aliyuncs.com/modelstudio/cli/generateAccessToken`，version `2026-02-10`）→ CLI access token
 2. 匿名调 `listFoundationModels` 拿全部模型清单（已实测无需登录）
@@ -117,7 +117,7 @@ AK/SK 的合规获取（阿里云 RAM 文档）：
 
 ## 相关与备用
 
-- 本仓库副本：`./cli`（modelstudioai/cli v2.3.1 源码，裁减依据）
+- 裁减依据：官方 modelstudioai/cli v2.3.1 源码（https://github.com/modelstudioai/cli ，本地副本已删除）
 - 官方文档：https://help.aliyun.com/zh/model-studio/cli/installation
 - 用完即停状态：`...freeTrial.queryFreeTierInterceptStatus` / CLI `bl usage freetier`
 - 余额/优惠券：`https://bailian.console.aliyun.com/data/v2/multiApi.json?_fetcher_=BssOpenAPI-V3__...QueryFreetierInstanceInfo`
