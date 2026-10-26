@@ -126,3 +126,13 @@ AK/SK 的合规获取（阿里云 RAM 文档）：
 ## 页面状态
 
 - IAB 标签页保留且已登录，免费额度表格在第 1 页
+
+## RAM 用户路径实测（2026-10-27）
+
+主账号 AK 换成专用 RAM 用户 `quota-reader` 后，链路需要三块拼图（缺一不可）：
+
+1. **系统策略** `AliyunBailianReadOnlyAccess` —— 覆盖百炼业务读操作，但**不含** `GenerateCLIAccessToken`；
+2. **自定义策略** `quota-cli-token` —— 仅允许 `modelstudio:GenerateCLIAccessToken` + `sfm:GenerateCLIAccessToken`（两个命名空间都写，RAM 自行匹配）；缺它时 OpenAPI 返回 `NoPermission`；
+3. **百炼业务空间成员** —— 百炼控制台「管理 → 账号管理 → 添加用户」把 RAM 用户加入业务空间，页面权限勾「模型用量&免费额度-操作」（本次直接全选 38 项）；缺它时网关返回 `BailianGateway.Team.NotAuthorised`（token 能换到，但网关拒绝）。
+
+**端到端真实验证通过**：Go 工具（ACS3 签名 → GenerateCLIAccessToken → listFoundationModels → queryFreeTierQuota → SQLite）取回 370 个模型、79 个有额度，快照 #2 入库，看板显示「刚刚更新」。与 10 天前主账号快照（82 个有额度）交叉一致：差额来自期间到期的额度。

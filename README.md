@@ -129,6 +129,10 @@ JSON 输出结构（`--json`，与旧版 Python 工具的归档格式完全一�
 
 需要一对阿里云 AK/SK（AccessKey ID / Secret），建议在 [RAM 控制台](https://ram.console.aliyun.com) 创建**专用 RAM 用户**并挂 `AliyunBailianReadOnlyAccess`，不要使用主账号 AK（官方强烈不建议）。API Key（`sk-`）**不能**用于查询免费额度——控制台网关会拒绝（返回 `BailianGateway.Login.NotLogined`）。
 
+> **RAM 用户两条额外配置**（缺一不可，2026-10-27 实测）：
+> 1. `AliyunBailianReadOnlyAccess` **不含**换 CLI token 的内部动作 `GenerateCLIAccessToken`，需另建自定义策略允许 `modelstudio:GenerateCLIAccessToken` 与 `sfm:GenerateCLIAccessToken`（本账号已建 `quota-cli-token`）；
+> 2. 在百炼控制台「右上角 管理 → 账号管理 → 添加用户」把该 RAM 用户加入业务空间，并勾选页面权限（至少含「模型用量&免费额度-操作」），否则网关返回 `BailianGateway.Team.NotAuthorised`。
+
 凭证读取顺序：`--ak/--sk` 参数 > 环境变量 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`（及可选 `ALIBABA_CLOUD_SECURITY_TOKEN`）> 凭证文件中的同名键。凭证文件默认 `~/.config/bailian-quota.env`（可用 `--env-file` 或 `BAILIAN_ENV_FILE` 覆盖）：
 
 ```bash
