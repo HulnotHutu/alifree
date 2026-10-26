@@ -186,6 +186,32 @@
   .chart { width: 100%; height: 300px; }
   @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
 
+  /* ---- 分页 ---- */
+  .chartScope { font-size: 12.5px; font-weight: 450; color: var(--faint); margin-left: 6px; }
+  .pager {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 14px; border-top: 1px solid var(--line-soft);
+    font-size: 13px; color: var(--muted);
+  }
+  .pager:empty { display: none; }
+  .pgBtn {
+    min-width: 30px; height: 28px; padding: 0 8px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--ink); font: inherit; font-size: 13px;
+    cursor: pointer;
+  }
+  .pgBtn:hover:not(:disabled):not(.active) { border-color: var(--faint); }
+  .pgBtn:disabled { opacity: .45; cursor: default; }
+  .pgBtn.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 550; }
+  .pgBtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .pager select {
+    font: inherit; font-size: 13px; padding: 3px 6px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--ink);
+  }
+  .pager .spacer { flex: 1; }
+  .pager .ellipsis { padding: 0 2px; }
+
   /* ---- 空态 / 加载 / 页脚 ---- */
   .placeholder { padding: 56px 20px; text-align: center; color: var(--muted); }
   .placeholder .big { font-size: 15.5px; color: var(--ink); margin-bottom: 6px; }
@@ -239,7 +265,7 @@
   </section>
 
   <div class="chartHead" id="chartHead" hidden>
-    <h2>可视化</h2>
+    <h2>可视化 <span class="chartScope" id="chartScope"></span></h2>
     <button class="chip" id="toggleCharts" type="button" aria-pressed="true">收起图表</button>
   </div>
   <section class="charts" id="charts" hidden>
@@ -261,6 +287,7 @@
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
+    <div class="pager" id="pager"></div>
   </div>
 
   <div class="placeholder" id="placeholder">加载中…</div>
@@ -296,9 +323,10 @@
   const DEFAULT_SORT = { model: 1, remaining: -1, total: -1, pct: 1, days: 1 };
 
   const state = {
-    data: null, meta: null, types: [],
+    data: null, meta: null, types: [], history: null,
     q: "", type: "全部", quick: "可用",
     sortKey: "pct", sortDir: 1, chartsCollapsed: false,
+    page: 1, pageSize: 20,
   };
 
   // --- 数据整形 ------------------------------------------------------------
@@ -405,7 +433,12 @@
   }
 
   function renderTable() {
-    const rows = currentRows();
+    const all = currentRows();
+    const totalPages = Math.max(1, Math.ceil(all.length / state.pageSize));
+    if (state.page > totalPages) state.page = totalPages;
+    const start = (state.page - 1) * state.pageSize;
+    const rows = all.slice(start, start + state.pageSize);
+
     $("#rows").innerHTML = rows.map(r => `
       <tr class="${r.expired ? "expired" : ""}">
         <td class="mono model">${esc(r.model)}</td>
@@ -418,14 +451,43 @@
         </div></td>
         <td class="expiry">${expiryHtml(r)}</td>
       </tr>`).join("");
-    $("#count").textContent = `显示 ${rows.length} / ${state.data.models.length} 个模型`;
-    $("#tableWrap").hidden = rows.length === 0;
-    $("#placeholder").hidden = rows.length > 0;
-    if (rows.length === 0) {
+    $("#count").textContent = `显示 ${all.length} / ${state.data.models.length} 个模型`;
+    renderPager(all.length, totalPages);
+    $("#tableWrap").hidden = all.length === 0;
+    $("#placeholder").hidden = all.length > 0;
+    if (all.length === 0) {
       $("#placeholder").innerHTML =
         `<div class="big">没有匹配的模型</div>
          <div>换个关键词，或 <button type="button" id="clearBtn">清除筛选</button></div>`;
     }
+  }
+
+  function renderPager(total, totalPages) {
+    const pager = $("#pager");
+    if (total === 0) { pager.innerHTML = ""; return; }
+    const nums = [];
+    let last = 0;
+    for (let p = 1; p <= totalPages; p++) {
+      if (p === 1 || p === totalPages || Math.abs(p - state.page) <= 1) {
+        if (p - last > 1) nums.push("…");
+        nums.push(p);
+        last = p;
+      }
+    }
+    const from = (state.page - 1) * state.pageSize + 1;
+    const to = Math.min(total, state.page * state.pageSize);
+    pager.innerHTML =
+      `<span>共 ${total} 条 · 第 ${state.page}/${totalPages} 页（${from}–${to}）</span>` +
+      `<button class="pgBtn" type="button" data-page="${state.page - 1}" ${state.page <= 1 ? "disabled" : ""} aria-label="上一页">‹</button>` +
+      nums.map(p => p === "…"
+        ? `<span class="ellipsis">…</span>`
+        : `<button class="pgBtn ${p === state.page ? "active" : ""}" type="button" data-page="${p}"
+             ${p === state.page ? 'aria-current="page"' : ""}>${p}</button>`).join("") +
+      `<button class="pgBtn" type="button" data-page="${state.page + 1}" ${state.page >= totalPages ? "disabled" : ""} aria-label="下一页">›</button>` +
+      `<span class="spacer"></span>` +
+      `<label>每页 <select id="pageSize" aria-label="每页条数">` +
+        [20, 50, 100].map(n => `<option value="${n}" ${n === state.pageSize ? "selected" : ""}>${n}</option>`).join("") +
+      `</select> 条</label>`;
   }
 
   function renderSortHeads() {
@@ -498,8 +560,18 @@
   }
 
   function renderCharts() {
-    const rows = state.data.models;
-    if (!rows || typeof echarts === "undefined") return;
+    // 图表跟随当前筛选视图（与下方表格同源），历史趋势图除外
+    const rows = currentRows();
+    if (!state.data || typeof echarts === "undefined") return;
+
+    $("#chartScope").textContent =
+      `当前视图：${state.quick} · ${state.type === "全部" ? "全部类型" : typeLabel(state.type)}` +
+      (state.q ? ` · 关键词“${state.q}”` : "") + ` · ${rows.length} 个模型`;
+    const empty = rows.length === 0;
+    const emptyMark = empty
+      ? [{ type: "text", left: "center", top: "middle",
+           style: { text: "当前筛选无模型", fill: "#98A2B3", fontSize: 13 } }]
+      : [];
 
     // 1. 各类型剩余额度
     const byType = {};
@@ -512,6 +584,7 @@
     const types = Object.keys(byType).sort((a, b) => byType[b].rem - byType[a].rem);
     chart("chartType", {
       grid: { left: 8, right: 16, top: 30, bottom: 0, containLabel: true },
+      graphic: emptyMark,
       tooltip: {
         trigger: "axis",
         formatter: ps => ps.map(p =>
@@ -533,6 +606,7 @@
     const counts = {};
     for (const r of rows) counts[expiryBucket(r)] = (counts[expiryBucket(r)] || 0) + 1;
     chart("chartExpiry", {
+      graphic: emptyMark,
       tooltip: { trigger: "item", formatter: "{b}：{c} 个（{d}%）" },
       legend: { bottom: 0, textStyle: AXIS, itemWidth: 12, itemHeight: 8 },
       series: [{
@@ -558,6 +632,7 @@
     const binColors = ["#E5484D", "#E5484D", "#DD8E00", "#DD8E00", "#0E9F6E", "#0E9F6E"];
     chart("chartRatio", {
       grid: { left: 8, right: 16, top: 30, bottom: 0, containLabel: true },
+      graphic: emptyMark,
       tooltip: { trigger: "axis", formatter: ps => ps.map(p => `${p.name}：${p.value} 个模型`).join("<br>") },
       xAxis: { type: "category", data: bins.map(b => b[0]), axisLabel: { ...AXIS, interval: 0 }, axisLine: { lineStyle: { color: "#E3E7ED" } } },
       yAxis: { type: "value", minInterval: 1, axisLabel: AXIS, splitLine: SPLIT },
@@ -568,27 +643,37 @@
       }],
     });
 
-    // 4. 快照历史趋势
-    fetch("/api/history").then(r => r.json()).then(runs => {
-      if (!Array.isArray(runs) || !runs.length) return;
-      const asc = [...runs].sort((a, b) => a.id - b.id);
-      chart("chartHistory", {
-        grid: { left: 8, right: 16, top: 36, bottom: 0, containLabel: true },
-        tooltip: { trigger: "axis" },
-        legend: { top: 0, textStyle: AXIS, itemWidth: 14, itemHeight: 8 },
-        xAxis: { type: "category", boundaryGap: false,
-                 data: asc.map(r => r.fetchedAt.slice(0, 16).replace("T", " ")),
-                 axisLabel: { ...AXIS, hideOverlap: true }, axisLine: { lineStyle: { color: "#E3E7ED" } } },
-        yAxis: { type: "value", axisLabel: AXIS, splitLine: SPLIT },
-        series: [
-          { name: "有额度模型", type: "line", smooth: true, symbolSize: 6,
-            data: asc.map(r => r.withQuota), itemStyle: { color: "#E05200" },
-            areaStyle: { color: "rgba(224,82,0,.08)" } },
-          { name: "查询到的模型总数", type: "line", smooth: true, symbolSize: 6,
-            data: asc.map(r => r.totalModels), itemStyle: { color: "#2E90FA" }, lineStyle: { type: "dashed" } },
-        ],
-      });
+    // 4. 快照历史趋势（跨快照的全局视图，不随筛选变化）
+    renderHistoryChart();
+  }
+
+  function loadHistory() {
+    return fetch("/api/history").then(r => r.json()).then(runs => {
+      state.history = Array.isArray(runs) ? runs : [];
+      renderHistoryChart();
     }).catch(() => {});
+  }
+
+  function renderHistoryChart() {
+    const runs = state.history;
+    if (!Array.isArray(runs) || !runs.length) return;
+    const asc = [...runs].sort((a, b) => a.id - b.id);
+    chart("chartHistory", {
+      grid: { left: 8, right: 16, top: 36, bottom: 0, containLabel: true },
+      tooltip: { trigger: "axis" },
+      legend: { top: 0, textStyle: AXIS, itemWidth: 14, itemHeight: 8 },
+      xAxis: { type: "category", boundaryGap: false,
+               data: asc.map(r => r.fetchedAt.slice(0, 16).replace("T", " ")),
+               axisLabel: { ...AXIS, hideOverlap: true }, axisLine: { lineStyle: { color: "#E3E7ED" } } },
+      yAxis: { type: "value", axisLabel: AXIS, splitLine: SPLIT },
+      series: [
+        { name: "有额度模型", type: "line", smooth: true, symbolSize: 6,
+          data: asc.map(r => r.withQuota), itemStyle: { color: "#E05200" },
+          areaStyle: { color: "rgba(224,82,0,.08)" } },
+        { name: "查询到的模型总数", type: "line", smooth: true, symbolSize: 6,
+          data: asc.map(r => r.totalModels), itemStyle: { color: "#2E90FA" }, lineStyle: { type: "dashed" } },
+      ],
+    });
   }
 
   // --- 交互 ----------------------------------------------------------------
@@ -596,19 +681,22 @@
     const btn = e.target.closest("[data-quick]");
     if (!btn) return;
     state.quick = btn.dataset.quick;
-    renderStats(); renderTable();
+    state.page = 1;
+    renderStats(); renderTable(); renderCharts();
   });
 
   $("#chips").addEventListener("click", e => {
     const btn = e.target.closest("[data-type]");
     if (!btn) return;
     state.type = btn.dataset.type;
-    renderChips(); renderTable();
+    state.page = 1;
+    renderChips(); renderTable(); renderCharts();
   });
 
   $("#search").addEventListener("input", e => {
     state.q = e.target.value.trim().toLowerCase();
-    renderTable();
+    state.page = 1;
+    renderTable(); renderCharts();
   });
 
   document.querySelector("thead").addEventListener("click", e => {
@@ -617,7 +705,22 @@
     const key = th.dataset.key;
     if (state.sortKey === key) state.sortDir = -state.sortDir;
     else { state.sortKey = key; state.sortDir = DEFAULT_SORT[key] || 1; }
+    state.page = 1;
     renderSortHeads(); renderTable();
+  });
+
+  $("#pager").addEventListener("click", e => {
+    const b = e.target.closest("[data-page]");
+    if (!b || b.disabled) return;
+    state.page = Number(b.dataset.page);
+    renderTable();
+  });
+
+  $("#pager").addEventListener("change", e => {
+    if (e.target.id !== "pageSize") return;
+    state.pageSize = Number(e.target.value);
+    state.page = 1;
+    renderTable();
   });
 
   $("#placeholder").addEventListener("click", e => {
@@ -648,8 +751,9 @@
       const out = await res.json();
       if (out.ok) {
         state.data = out.data; state.meta = out.meta;
+        state.page = 1;
         derive(state.data.models);
-        renderAll(); renderFreshness();
+        renderAll(); renderFreshness(); loadHistory();
         showBanner(null);
       } else {
         showBanner("error", esc(out.error || "刷新失败"));
@@ -674,7 +778,7 @@
       }
       state.data = out.data; state.meta = out.meta;
       derive(state.data.models);
-      renderAll(); renderFreshness();
+      renderAll(); renderFreshness(); loadHistory();
     } catch (err) {
       $("#placeholder").innerHTML =
         `<div class="big">加载失败</div><div>${esc(err.message)}</div>`;
