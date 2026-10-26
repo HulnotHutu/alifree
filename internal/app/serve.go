@@ -137,7 +137,7 @@ func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if !creds.Complete() {
 		writeJSON(w, http.StatusOK, apiEnvelope{
 			OK:    false,
-			Error: fmt.Sprintf("缺少凭证，无法刷新。请在 %s 写入 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET（见 README），重启本服务后再试。", s.envFile),
+			Error: fmt.Sprintf("缺少凭证，无法刷新。请在 %s 写入 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET（见 README），保存后直接再点刷新即可，无需重启。", s.envFile),
 			Meta:  &apiMeta{DB: s.store.DBPath, Credentials: false},
 		})
 		return
