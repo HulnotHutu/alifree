@@ -8,6 +8,7 @@ Go 实现的工具集：**百炼免费额度 CLI 与本地看板**，以及通�
 
 - [目录结构](#目录结构)
 - [构建与测试](#构建与测试)
+- [终端 AI 异步问答（aihelpme）](#终端-ai-异步问答aihelpme)
 - [免费额度 CLI（quota fetch）](#免费额度-cliquota-fetch)
 - [额度看板（quota serve）](#额度看板quota-serve)
 - [准备凭证](#准备凭证)
@@ -34,7 +35,10 @@ Go 实现的工具集：**百炼免费额度 CLI 与本地看板**，以及通�
 ```text
 dashscope-call/
 ├── cmd/quota/            # 入口：quota fetch / serve / history
+├── cmd/aihelpme/         # cli：-a 向 ai 提交问题 / 无参数取回答
+├── cmd/aihelpmed/        # daemon：内存队列 + unix socket + AI 调用
 ├── internal/
+│   ├── aihelpme/         # cli/daemon 共用：daemon 内存队列、socket RPC、配置加载、compatible-mode 调用
 │   ├── bailian/          # ACS3 签名、CLI token、控制台网关、额度快照
 │   ├── store/            # SQLite 存储（snapshots + model_quotas 两表）
 │   ├── format/           # K/M 数字与到期日格式化
@@ -50,10 +54,34 @@ dashscope-call/
 需要 Go 1.24+（模块代理不通时可设 `HTTPS_PROXY=socks5://127.0.0.1:10808`）：
 
 ```bash
-make build     # 构建 bin/quota
+make build     # 构建 bin/quota 与 bin/aihelpme
 make test      # 单元测试
 make vet fmt   # 静态检查与格式化
 ```
+
+## 终端 AI 异步问答（aihelpme）
+
+docker 式的 cli/daemon 结构：`aihelpme` 是薄客户端，`aihelpmed` 是常驻 daemon，队列和结果全部保存在 daemon 内存里，不落盘。
+
+```bash
+aihelpme -a "Go 里怎么原子地交换两个 int？"   # put：发给 daemon，立即返回（打印任务 id）
+cat big_doc.txt | aihelpme -a "总结这份文档"  # 管道内容拼在问题后
+aihelpme                                      # get：有就绪回答就打印，没有则提示稍等
+```
+
+- `aihelpme`（cli）：`-a` 通过 unix socket（`$XDG_RUNTIME_DIR/aihelpme.sock`）把问题交给 daemon 后立即返回；裸命令取最新完成的回答。daemon 未运行时 cli 会自动拉起一个。
+- `aihelpmed`（daemon）：监听 socket，内存里维护问题队列与已完成结果，逐个调用百炼 compatible-mode 接口。等待 AI 的过程完全发生在 daemon 内，不占用任何终端。不落盘、无通知机制；Ctrl-C 退出即状态清空，重复启动会被单实例检查拦下。
+
+调用配置在 `~/.config/aihelpme/config.yaml`（`AIHELPME_CONFIG` 可覆盖），daemon 启动时加载，cli 不读配置：
+
+```yaml
+workspace_id: llm-p317n4rywd1joyu3
+model: deepseek-v4-flash-0731
+call_timeout: 10m              # 可选，默认 10m
+system_prompt: <回答风格提示词，可留空>
+```
+
+缺文件或缺 `workspace_id`/`model` 时 daemon 启动即报错并打印示例；改完配置重启 daemon 生效。
 
 ## 免费额度 CLI（quota fetch）
 

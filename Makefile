@@ -1,13 +1,14 @@
-BINARY := bin/quota
-PKG    := ./cmd/quota
+GOBUILD := go build -trimpath -ldflags="-s -w"
 
 .PHONY: build run test vet tidy fmt clean
 
 build:
-	go build -trimpath -ldflags="-s -w" -o $(BINARY) $(PKG)
+	$(GOBUILD) -o bin/quota ./cmd/quota
+	$(GOBUILD) -o bin/aihelpme ./cmd/aihelpme
+	$(GOBUILD) -o bin/aihelpmed ./cmd/aihelpmed
 
 run: build
-	$(BINARY) serve
+	bin/quota serve
 
 test:
 	go test ./...
