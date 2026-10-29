@@ -42,19 +42,15 @@ func usage() {
 `)
 }
 
-// runPut validates and assembles the question, hands it to the daemon, and
-// prints only its job id, the way docker run -d prints a container id.
+// runPut validates and assembles the question and hands it to the daemon.
+// Success is silent: the answer arrives via a later bare invocation.
 func runPut(args []string) error {
 	question, err := readQuestion(args)
 	if err != nil {
 		return err
 	}
-	id, err := aihelpme.Submit(question)
-	if err != nil {
-		return err
-	}
-	fmt.Println(id)
-	return nil
+	_, err = aihelpme.Submit(question)
+	return err
 }
 
 // runGet fetches the newest finished answer: a wait hint when nothing is
@@ -66,7 +62,7 @@ func runGet() error {
 		return err
 	}
 	if res == nil {
-		return fmt.Errorf("还没有就绪的回答，稍等片刻再取")
+		return fmt.Errorf("稍等片刻再取")
 	}
 	if res.Err != "" {
 		return fmt.Errorf("任务失败：%s", res.Err)

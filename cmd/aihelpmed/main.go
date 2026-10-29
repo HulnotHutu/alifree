@@ -5,8 +5,10 @@
 package main
 
 import (
-	"fmt"
+	"errors"
+	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,36 +17,49 @@ import (
 )
 
 func main() {
+	aihelpme.SetupLogging()
+
 	cfg, err := aihelpme.LoadConfig()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "aihelpmed："+err.Error())
+		slog.Error("config load failed", "err", err)
 		os.Exit(1)
 	}
-
+	// 当前用户空间的 /run 运行时 or /tmp 临时目录存放 Unix 域套接字
 	sock := aihelpme.SocketPath()
+	// 测试连接发现已经存在
 	if conn, err := net.Dial("unix", sock); err == nil {
 		conn.Close()
-		fmt.Fprintln(os.Stderr, "aihelpmed：已有实例在运行")
+		slog.Warn("another daemon instance is running", "socket", sock)
 		os.Exit(1)
 	}
 	_ = os.Remove(sock) // stale socket file left by a previous run
-
+	// 监听 unix 管道
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "aihelpmed 监听失败："+err.Error())
+		slog.Error("listen failed", "socket", sock, "err", err)
 		os.Exit(1)
 	}
-	fmt.Println("aihelpmed：监听", sock, "（Ctrl-C 退出，内存数据随之清空）")
+	slog.Info("daemon started",
+		"socket", sock,
+		"pid", os.Getpid(),
+		"workspace", cfg.WorkspaceID,
+		"model", cfg.Model,
+		"call_timeout", cfg.CallTimeout.String())
 
 	d := aihelpme.NewDaemon(cfg)
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		<-sig
+		s := <-sig
+		slog.Info("shutdown requested", "signal", s.String())
 		ln.Close()
 	}()
-	if err := d.Serve(ln); err != nil {
-		fmt.Fprintln(os.Stderr, "aihelpmed 退出："+err.Error())
+	// Serve 返回 ErrServerClosed 或 listener 关闭引发的 net.ErrClosed 都属正常退出
+	if err := d.Serve(ln); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) &&
+		!errors.Is(err, net.ErrClosed) {
+		slog.Error("serve exited", "err", err)
 		os.Exit(1)
 	}
+	slog.Info("daemon stopped")
 }

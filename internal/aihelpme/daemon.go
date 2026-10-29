@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // job is one question waiting to be processed.
@@ -68,18 +70,29 @@ func (d *Daemon) work() {
 		if len(d.queue) == 0 {
 			d.working = false
 			d.mu.Unlock()
+			slog.Debug("worker idle, exit")
 			return
 		}
 		j := d.queue[0]
 		d.queue = d.queue[1:]
 		d.mu.Unlock()
 
+		slog.Info("job started", "job_id", j.ID, "question_chars", utf8.RuneCountInString(j.Question))
+		start := time.Now()
 		res := &Result{ID: j.ID}
 		answer, err := ChatCompletion(context.Background(), d.cfg, j.Question)
 		if err != nil {
 			res.Err = err.Error()
+			slog.Error("job failed",
+				"job_id", j.ID,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"err", err)
 		} else {
 			res.Answer = answer
+			slog.Info("job finished",
+				"job_id", j.ID,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"answer_chars", utf8.RuneCountInString(answer))
 		}
 
 		d.mu.Lock()
@@ -103,19 +116,62 @@ func (d *Daemon) Get() (*Result, bool) {
 }
 
 // Serve handles cli connections on ln until it is closed: POST /put enqueues
-// a question, GET /get fetches the newest finished answer.
+// a question, GET /get fetches the newest finished answer, and GET /list
+// reports the queue state (intended for curl, not wrapped by the cli).
+// Every request passes through the logging middleware.
 func (d *Daemon) Serve(ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /put", d.handlePut)
 	mux.HandleFunc("GET /get", d.handleGet)
-	return (&http.Server{Handler: mux}).Serve(ln)
+	mux.HandleFunc("GET /list", d.handleList)
+	return (&http.Server{Handler: d.logRequests(mux)}).Serve(ln)
+}
+
+// logRequests logs each request at its entry (debug) and its exit (info,
+// with status and duration) — the entry/exit pair that answers when, what,
+// and with what result. It relies on handlers writing a status via
+// WriteHeader; unwritten ones count as 200.
+func (d *Daemon) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		slog.Debug("request start", "method", r.Method, "path", r.URL.Path)
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		slog.Info("request done",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
+
+// statusRecorder remembers the status code handed to the client so the
+// request-exit log can report the outcome.
+type statusRecorder struct {
+	http.ResponseWriter
+	status   int
+	wroteHdr bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wroteHdr {
+		s.status = code
+		s.wroteHdr = true
+	}
 }
 
 func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Question string `json:"question"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Question) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		slog.Warn("invalid put request", "reason", "bad json body", "err", err)
+		http.Error(w, `question empty, body should be {"question":"..."}`, http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Question) == "" {
+		slog.Warn("invalid put request", "reason", "empty question")
 		http.Error(w, `question empty, body should be {"question":"..."}`, http.StatusBadRequest)
 		return
 	}
@@ -125,6 +181,7 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleGet(w http.ResponseWriter, r *http.Request) {
 	res, ok := d.Get()
 	if !ok {
+		slog.Debug("get has nothing ready")
 		writeJSON(w, http.StatusOK, map[string]string{"state": "pending"})
 		return
 	}
@@ -136,10 +193,36 @@ func (d *Daemon) handleGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Status snapshots the queue: the ids waiting in submission order, whether
+// a job is being processed right now, and how many finished results are
+// waiting to be fetched.
+func (d *Daemon) Status() (queue []string, working bool, ready int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	queue = make([]string, 0, len(d.queue))
+	for _, j := range d.queue {
+		queue = append(queue, j.ID)
+	}
+	return queue, d.working, len(d.results)
+}
+
+// handleList backs GET /list: a JSON view of the queue for debugging via
+// curl --unix-socket; the cli has no wrapper for it.
+func (d *Daemon) handleList(w http.ResponseWriter, r *http.Request) {
+	queue, working, ready := d.Status()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"queue":   queue,
+		"working": working,
+		"ready":   ready,
+	})
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
 }
 
 // SocketPath returns the unix socket the daemon listens on:

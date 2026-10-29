@@ -64,7 +64,7 @@ make vet fmt   # 静态检查与格式化
 docker 式的 cli/daemon 结构：`aihelpme` 是薄客户端，`aihelpmed` 是常驻 daemon，队列和结果全部保存在 daemon 内存里，不落盘。
 
 ```bash
-aihelpme -a "Go 里怎么原子地交换两个 int？"   # put：发给 daemon，立即返回（打印任务 id）
+aihelpme -a "Go 里怎么原子地交换两个 int？"   # put：发给 daemon，静默返回
 cat big_doc.txt | aihelpme -a "总结这份文档"  # 管道内容拼在问题后
 aihelpme                                      # get：有就绪回答就打印，没有则提示稍等
 ```
@@ -82,6 +82,14 @@ system_prompt: <回答风格提示词，可留空>
 ```
 
 缺文件或缺 `workspace_id`/`model` 时 daemon 启动即报错并打印示例；改完配置重启 daemon 生效。
+
+调试：daemon 只监听 unix socket，可直接用 curl 查看队列状态（cli 未封装此接口）：
+
+```bash
+curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/list
+```
+
+日志：daemon 走 slog，JSON 输出到 stderr，含时间与来源（文件：行号）；级别由 `AIHELPME_LOG_LEVEL` 控制（debug/info/warn/error，默认 info）。字段约定：`job_id`/`model`/`status`/`duration_ms` 标识上下文与结果，`err` 承载异常。请求入口/出口（`request start`/`request done`）、业务节点（`job started`/`job finished`）、外部调用（`api call start`/`done`/`failed`）、错误处理均有对应事件。
 
 ## 免费额度 CLI（quota fetch）
 

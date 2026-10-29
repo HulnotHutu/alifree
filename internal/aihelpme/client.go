@@ -113,17 +113,15 @@ func (c *Client) Get() (*Result, error) {
 	return &Result{ID: out.ID, Answer: out.Answer, Err: out.Err}, nil
 }
 
-// spawnDaemon starts aihelpmed from next to the cli binary as a detached
-// process and waits for its socket to accept connections. It is a fallback:
-// running aihelpmed by hand always works too.
+// spawnDaemon starts aihelpmed as a detached process and waits for its
+// socket to accept connections. The binary is looked up next to the cli
+// first (the make build layout), then on PATH (covers go run, where the cli
+// itself is a temporary binary). It is a fallback: running aihelpmed by
+// hand always works too.
 func spawnDaemon() error {
-	exe, err := os.Executable()
+	daemon, err := daemonBinary()
 	if err != nil {
 		return err
-	}
-	daemon := filepath.Join(filepath.Dir(exe), "aihelpmed")
-	if _, err := os.Stat(daemon); err != nil {
-		return fmt.Errorf("找不到 %s（由 make build 生成）", daemon)
 	}
 	cmd := exec.Command(daemon)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // new session: survives the terminal closing
@@ -140,4 +138,20 @@ func spawnDaemon() error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return fmt.Errorf("socket 未就绪：%s", SocketPath())
+}
+
+// daemonBinary locates aihelpmed: next to the running cli binary, else on
+// PATH.
+func daemonBinary() (string, error) {
+	if exe, err := os.Executable(); err == nil {
+		p := filepath.Join(filepath.Dir(exe), "aihelpmed")
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	p, err := exec.LookPath("aihelpmed")
+	if err != nil {
+		return "", fmt.Errorf("找不到 aihelpmed（make build 生成 bin/aihelpmed，或放入 PATH）")
+	}
+	return p, nil
 }

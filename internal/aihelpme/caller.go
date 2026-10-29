@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
+	"time"
+	"unicode/utf8"
 )
 
 type message struct {
@@ -41,7 +44,30 @@ type chatResponse struct {
 // HTTP client enforces cfg.CallTimeout, so a hung request surfaces as an
 // error instead of tying up the worker forever. A non-200 response, an
 // error payload, or an empty reply is returned as an error.
-func ChatCompletion(ctx context.Context, cfg *Config, question string) (string, error) {
+//
+// This is the daemon's only external call, so start and outcome are logged
+// here (debug start, info done, error failed) regardless of which path
+// returns.
+func ChatCompletion(ctx context.Context, cfg *Config, question string) (answer string, err error) {
+	start := time.Now()
+	slog.Debug("api call start",
+		"model", cfg.Model,
+		"workspace", cfg.WorkspaceID,
+		"question_chars", utf8.RuneCountInString(question))
+	defer func() {
+		if err != nil {
+			slog.Error("api call failed",
+				"model", cfg.Model,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"err", err)
+			return
+		}
+		slog.Info("api call done",
+			"model", cfg.Model,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"answer_chars", utf8.RuneCountInString(answer))
+	}()
+
 	apiKey := os.Getenv("DASHSCOPE_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("缺少 DASHSCOPE_API_KEY 环境变量")
