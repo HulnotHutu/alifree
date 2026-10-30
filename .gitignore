@@ -7,9 +7,10 @@
 *.db-wal
 *.db-shm
 
-# 本地工具状态
+# 本地工具状态（IDE / agent 工作区）
 /.workbuddy/
 /.zcode/
+/.idea/
 
 # Python
 __pycache__/

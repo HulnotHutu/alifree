@@ -1,8 +1,9 @@
-// Command aihelpme is the cli of the terminal AI Q&A tool: -a sends a
-// question to aihelpmed, no arguments fetches the newest answer. The AI
-// calls happen in the daemon (aihelpmed), which is spawned on demand. This
-// file owns the whole cli surface: argument validation, question assembly,
-// output formatting, and exit codes.
+// Command aihelpme is the cli of the terminal AI Q&A tool: with input (a
+// question argument or piped stdin) it sends the question to aihelpmed;
+// without input it prints the newest answer. The AI calls happen in the
+// daemon (aihelpmed), which is spawned on demand. This file owns the whole
+// cli surface: input detection, question assembly, output formatting, and
+// exit codes.
 package main
 
 import (
@@ -15,17 +16,22 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		exit(runGet())
+	// 有输入（位置参数或管道 stdin）即向 ai 提问；无输入即取最新回答。
+	if len(os.Args) > 1 || hasPipedStdin() {
+		exit(runPut(os.Args[1:]))
 		return
 	}
-	switch os.Args[1] {
-	case "-a":
-		exit(runPut(os.Args[2:]))
-	default:
-		usage()
-		os.Exit(2)
+	exit(runGet())
+}
+
+// hasPipedStdin reports whether stdin is a pipe or file rather than a
+// terminal, i.e. whether the caller piped a document into us.
+func hasPipedStdin() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
 	}
+	return stat.Mode()&os.ModeCharDevice == 0
 }
 
 // exit reports an error with status 1; nil returns quietly with status 0.
@@ -36,21 +42,24 @@ func exit(err error) {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `用法：aihelpme -a "问题"   向ai提交问题
-      aihelpme             等待并打印最新一次的回答
-`)
-}
-
-// runPut validates and assembles the question and hands it to the daemon.
-// Success is silent: the answer arrives via a later bare invocation.
+// runPut validates and assembles the question and hands it to the daemon,
+// then blocks up to five seconds: short questions print their answer right
+// in this invocation, longer ones leave a wait hint on stderr and the
+// answer is fetched by a later bare invocation.
 func runPut(args []string) error {
 	question, err := readQuestion(args)
 	if err != nil {
 		return err
 	}
-	_, err = aihelpme.Submit(question)
-	return err
+	res, err := aihelpme.Ask(question)
+	if err != nil {
+		return err
+	}
+	if res == nil {
+		fmt.Fprintln(os.Stderr, "仍在处理中，稍后运行 aihelpme 取回答")
+		return nil
+	}
+	return printResult(res)
 }
 
 // runGet fetches the newest finished answer: a wait hint when nothing is
@@ -64,6 +73,12 @@ func runGet() error {
 	if res == nil {
 		return fmt.Errorf("稍等片刻再取")
 	}
+	return printResult(res)
+}
+
+// printResult writes the outcome for the user: the failure reason as an
+// error, or the answer alone on stdout so it can be piped on.
+func printResult(res *aihelpme.Result) error {
 	if res.Err != "" {
 		return fmt.Errorf("任务失败：%s", res.Err)
 	}
@@ -96,7 +111,7 @@ func readQuestion(args []string) (string, error) {
 		}
 	}
 	if strings.TrimSpace(question) == "" {
-		return "", fmt.Errorf(`问题为空，用法：aihelpme -a "问题"`)
+		return "", fmt.Errorf("问题为空（输入为空管道或仅空白字符）")
 	}
 	return question, nil
 }

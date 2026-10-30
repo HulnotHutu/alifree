@@ -44,6 +44,7 @@ func main() {
 		"pid", os.Getpid(),
 		"workspace", cfg.WorkspaceID,
 		"model", cfg.Model,
+		"quota_db", cfg.QuotaDB,
 		"call_timeout", cfg.CallTimeout.String())
 
 	d := aihelpme.NewDaemon(cfg)

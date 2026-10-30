@@ -9,6 +9,7 @@ Go 实现的工具集：**百炼免费额度 CLI 与本地看板**，以及通�
 - [目录结构](#目录结构)
 - [构建与测试](#构建与测试)
 - [终端 AI 异步问答（aihelpme）](#终端-ai-异步问答aihelpme)
+- [systemd 用户服务部署（aihelpmed）](#systemd-用户服务部署aihelpmed)
 - [免费额度 CLI（quota fetch）](#免费额度-cliquota-fetch)
 - [额度看板（quota serve）](#额度看板quota-serve)
 - [准备凭证](#准备凭证)
@@ -64,12 +65,12 @@ make vet fmt   # 静态检查与格式化
 docker 式的 cli/daemon 结构：`aihelpme` 是薄客户端，`aihelpmed` 是常驻 daemon，队列和结果全部保存在 daemon 内存里，不落盘。
 
 ```bash
-aihelpme -a "Go 里怎么原子地交换两个 int？"   # put：发给 daemon，静默返回
-cat big_doc.txt | aihelpme -a "总结这份文档"  # 管道内容拼在问题后
-aihelpme                                      # get：有就绪回答就打印，没有则提示稍等
+aihelpme "Go 里怎么原子地交换两个 int？"   # put：提问后阻塞至多 5s，短问题当场得到回答
+cat big_doc.txt | aihelpme "总结这份文档"  # 管道内容拼在问题后
+aihelpme                                   # get：无输入即取最新回答，未就绪提示稍等
 ```
 
-- `aihelpme`（cli）：`-a` 通过 unix socket（`$XDG_RUNTIME_DIR/aihelpme.sock`）把问题交给 daemon 后立即返回；裸命令取最新完成的回答。daemon 未运行时 cli 会自动拉起一个。
+- `aihelpme`（cli）：**有输入即提问**（位置参数或管道 stdin），经 unix socket 发给 daemon 后**阻塞至多 5s**——短问题当场打印回答（stdout 纯净，可继续管道），超时则提示"仍在处理中"，答案稍后用裸命令取回；**无输入即取回答**。daemon 未运行时 cli 会自动拉起一个。
 - `aihelpmed`（daemon）：监听 socket，内存里维护问题队列与已完成结果，逐个调用百炼 compatible-mode 接口。等待 AI 的过程完全发生在 daemon 内，不占用任何终端。不落盘、无通知机制；Ctrl-C 退出即状态清空，重复启动会被单实例检查拦下。
 
 调用配置在 `~/.config/aihelpme/config.yaml`（`AIHELPME_CONFIG` 可覆盖），daemon 启动时加载，cli 不读配置：
@@ -78,18 +79,68 @@ aihelpme                                      # get：有就绪回答就打印�
 workspace_id: llm-p317n4rywd1joyu3
 model: deepseek-v4-flash-0731
 call_timeout: 10m              # 可选，默认 10m
+quota_db: /home/hulut/note-space/dashscope-call/data/quota.db   # 可选，quota 工具 SQLite 路径，启用 /model 接口
 system_prompt: <回答风格提示词，可留空>
 ```
 
 缺文件或缺 `workspace_id`/`model` 时 daemon 启动即报错并打印示例；改完配置重启 daemon 生效。
 
-调试：daemon 只监听 unix socket，可直接用 curl 查看队列状态（cli 未封装此接口）：
+调试与模型管理：daemon 只监听 unix socket，以下接口仅 curl 可用（cli 不封装）：
 
 ```bash
-curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/list
+curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/list   # 队列状态（排队 id/working/ready）
+curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/model  # 当前模型 + 可用 Text 模型
+curl -X PUT --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock \
+     -d '{"model":"qwen3.8-max"}' http://localhost/model                  # 切换模型，即时生效于后续任务
 ```
 
+`/model` 的可用列表来自 quota 工具的 SQLite（`main.model_quotas` 最新快照，路径由 `quota_db` 配置；`quota fetch --save` 刷新后即生效），只含剩余额度 > 0 的 Text 模型，按剩余降序；PUT 会校验目标在列表内，否则 400。切换保存在 daemon 内存，重启后回到 config.yaml 的 `model`。
+
 日志：daemon 走 slog，JSON 输出到 stderr，含时间与来源（文件：行号）；级别由 `AIHELPME_LOG_LEVEL` 控制（debug/info/warn/error，默认 info）。字段约定：`job_id`/`model`/`status`/`duration_ms` 标识上下文与结果，`err` 承载异常。请求入口/出口（`request start`/`request done`）、业务节点（`job started`/`job finished`）、外部调用（`api call start`/`done`/`failed`）、错误处理均有对应事件。
+
+## systemd 用户服务部署（aihelpmed）
+
+aihelpmed 是**用户级**常驻进程（socket 在 `$XDG_RUNTIME_DIR`、状态在内存），用 systemd --user 管理，而不是 nginx 那类系统级服务。与系统服务模板的差异：`Type=simple`（Go 程序前台运行，无需 PIDFile）、`WantedBy=default.target`、密钥经 `EnvironmentFile` 注入而非写进 unit，另加 `Restart=on-failure` 崩溃自愈。
+
+**1. 安装二进制与凭证文件**（config.yaml 见上节）：
+
+```bash
+install -m755 bin/aihelpme bin/aihelpmed ~/.local/bin/
+echo 'DASHSCOPE_API_KEY=sk-xxx' > ~/.config/aihelpme/env
+chmod 600 ~/.config/aihelpme/env
+```
+
+**2. unit 文件** `~/.config/systemd/user/aihelpmed.service`（用户手写 unit 的规范位置；软件包式安装则用 `~/.local/share/systemd/user/`，两者都被 systemd --user 搜索）：
+
+```ini
+[Unit]
+Description=aihelpmed：aihelpme 的常驻 daemon（内存队列 + unix socket）
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/aihelpme/env
+ExecStart=%h/.local/bin/aihelpmed
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+**3. 启用与运维**：
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now aihelpmed   # 开机自启 + 立即运行
+systemctl --user status aihelpmed
+journalctl --user -u aihelpmed -f         # slog JSON 日志直达 journald
+```
+
+说明：
+
+- `AIHELPME_LOG_LEVEL=debug` 等可加进 env 文件调整日志级别。
+- 重新构建后需重新 `install` 到 `~/.local/bin/`，再 `systemctl --user restart aihelpmed`。
+- 服务停止时 cli 会经 PATH 自动拉起 `aihelpmed` 兜底；想让 daemon 未登录也常驻：`loginctl enable-linger $USER`。
 
 ## 免费额度 CLI（quota fetch）
 

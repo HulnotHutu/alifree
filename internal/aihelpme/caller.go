@@ -38,7 +38,9 @@ type chatResponse struct {
 
 // ChatCompletion calls the OpenAI-compatible chat completions endpoint
 // synchronously and returns the assistant reply for question, prepending
-// cfg.SystemPrompt when it is set.
+// cfg.SystemPrompt when it is set. model is the effective model (it may
+// have been switched at runtime via PUT /model, so it comes in explicitly
+// instead of from cfg).
 //
 // The API key is read from the DASHSCOPE_API_KEY environment variable. The
 // HTTP client enforces cfg.CallTimeout, so a hung request surfaces as an
@@ -48,22 +50,22 @@ type chatResponse struct {
 // This is the daemon's only external call, so start and outcome are logged
 // here (debug start, info done, error failed) regardless of which path
 // returns.
-func ChatCompletion(ctx context.Context, cfg *Config, question string) (answer string, err error) {
+func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (answer string, err error) {
 	start := time.Now()
 	slog.Debug("api call start",
-		"model", cfg.Model,
+		"model", model,
 		"workspace", cfg.WorkspaceID,
 		"question_chars", utf8.RuneCountInString(question))
 	defer func() {
 		if err != nil {
 			slog.Error("api call failed",
-				"model", cfg.Model,
+				"model", model,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"err", err)
 			return
 		}
 		slog.Info("api call done",
-			"model", cfg.Model,
+			"model", model,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"answer_chars", utf8.RuneCountInString(answer))
 	}()
@@ -76,7 +78,7 @@ func ChatCompletion(ctx context.Context, cfg *Config, question string) (answer s
 	if cfg.SystemPrompt != "" {
 		messages = append([]message{{Role: "system", Content: cfg.SystemPrompt}}, messages...)
 	}
-	body, err := json.Marshal(chatRequest{Model: cfg.Model, Messages: messages})
+	body, err := json.Marshal(chatRequest{Model: model, Messages: messages})
 	if err != nil {
 		return "", err
 	}

@@ -36,21 +36,43 @@ type Result struct {
 // daemon process, the way container state dies with dockerd.
 type Daemon struct {
 	cfg     *Config
+	model   string // 当前生效的模型，PUT /model 可切换
 	mu      sync.Mutex
 	queue   []*job
 	results []*Result
 	working bool
+	notify  map[string]chan *Result // waiters blocked in Wait, by job id
 }
 
-// NewDaemon returns an empty daemon that calls the API with cfg.
-func NewDaemon(cfg *Config) *Daemon { return &Daemon{cfg: cfg} }
+// NewDaemon returns an empty daemon that calls the API with cfg; the
+// effective model starts at cfg.Model and can be switched via PUT /model.
+func NewDaemon(cfg *Config) *Daemon {
+	return &Daemon{cfg: cfg, model: cfg.Model, notify: map[string]chan *Result{}}
+}
 
-// Put appends a question to the queue and returns its job id, which the cli
-// prints docker-run -d style. A worker goroutine starts on the spot if the
-// daemon is idle; otherwise the question waits for the running one.
+// currentModel returns the model used for the next job.
+func (d *Daemon) currentModel() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.model
+}
+
+// setModel switches the model used for subsequent jobs.
+func (d *Daemon) setModel(m string) {
+	d.mu.Lock()
+	d.model = m
+	d.mu.Unlock()
+}
+
+// Put appends a question to the queue and returns its job id. A worker
+// goroutine starts on the spot if the daemon is idle; otherwise the
+// question waits for the running one. Waiters can await the outcome through
+// Wait.
 func (d *Daemon) Put(question string) string {
 	j := &job{ID: newID(), Question: question}
+	ch := make(chan *Result, 1) // buffered: the worker never blocks on send
 	d.mu.Lock()
+	d.notify[j.ID] = ch
 	d.queue = append(d.queue, j)
 	idle := !d.working
 	d.working = true
@@ -59,6 +81,40 @@ func (d *Daemon) Put(question string) string {
 		go d.work()
 	}
 	return j.ID
+}
+
+// Wait blocks until the job's result is available or the timeout elapses. A
+// result delivered through Wait is removed from the fetch queue, so it is
+// returned exactly once no matter which path picks it up. ok=false means
+// the timeout hit first, or the id is unknown (e.g. the daemon restarted
+// and lost its in-memory state).
+func (d *Daemon) Wait(id string, timeout time.Duration) (*Result, bool) {
+	d.mu.Lock()
+	ch := d.notify[id]
+	d.mu.Unlock()
+	if ch == nil {
+		return nil, false
+	}
+	select {
+	case res := <-ch:
+		d.removeResult(id)
+		return res, true
+	case <-time.After(timeout):
+		return nil, false
+	}
+}
+
+// removeResult drops the result with the given id from the fetch queue, so
+// a result delivered through Wait is not handed out a second time by Get.
+func (d *Daemon) removeResult(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i, res := range d.results {
+		if res.ID == id {
+			d.results = append(d.results[:i], d.results[i+1:]...)
+			return
+		}
+	}
 }
 
 // work drains the queue serially, waiting on each AI call inside the daemon
@@ -77,27 +133,35 @@ func (d *Daemon) work() {
 		d.queue = d.queue[1:]
 		d.mu.Unlock()
 
-		slog.Info("job started", "job_id", j.ID, "question_chars", utf8.RuneCountInString(j.Question))
+		model := d.currentModel()
+		slog.Info("job started", "job_id", j.ID, "model", model, "question_chars", utf8.RuneCountInString(j.Question))
 		start := time.Now()
 		res := &Result{ID: j.ID}
-		answer, err := ChatCompletion(context.Background(), d.cfg, j.Question)
+		answer, err := ChatCompletion(context.Background(), d.cfg, model, j.Question)
 		if err != nil {
 			res.Err = err.Error()
 			slog.Error("job failed",
 				"job_id", j.ID,
+				"model", model,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"err", err)
 		} else {
 			res.Answer = answer
 			slog.Info("job finished",
 				"job_id", j.ID,
+				"model", model,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"answer_chars", utf8.RuneCountInString(answer))
 		}
 
 		d.mu.Lock()
 		d.results = append(d.results, res)
+		ch := d.notify[res.ID]
+		delete(d.notify, res.ID)
 		d.mu.Unlock()
+		if ch != nil {
+			ch <- res // buffered(1): never blocks the worker
+		}
 	}
 }
 
@@ -115,15 +179,23 @@ func (d *Daemon) Get() (*Result, bool) {
 	return res, true
 }
 
+// waitMax caps how long a single /wait request may block the handler.
+const waitMax = time.Minute
+
 // Serve handles cli connections on ln until it is closed: POST /put enqueues
-// a question, GET /get fetches the newest finished answer, and GET /list
-// reports the queue state (intended for curl, not wrapped by the cli).
-// Every request passes through the logging middleware.
+// a question, GET /wait blocks for one job's result, GET /get fetches the
+// newest finished answer, GET /list reports the queue state, and GET/PUT
+// /model views or switches the effective model (/list and /model are
+// curl-only, not wrapped by the cli). Every request passes through the
+// logging middleware.
 func (d *Daemon) Serve(ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /put", d.handlePut)
+	mux.HandleFunc("GET /wait", d.handleWait)
 	mux.HandleFunc("GET /get", d.handleGet)
 	mux.HandleFunc("GET /list", d.handleList)
+	mux.HandleFunc("GET /model", d.handleGetModel)
+	mux.HandleFunc("PUT /model", d.handlePutModel)
 	return (&http.Server{Handler: d.logRequests(mux)}).Serve(ln)
 }
 
@@ -159,6 +231,7 @@ func (s *statusRecorder) WriteHeader(code int) {
 		s.status = code
 		s.wroteHdr = true
 	}
+	s.ResponseWriter.WriteHeader(code)
 }
 
 func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +263,90 @@ func (d *Daemon) handleGet(w http.ResponseWriter, r *http.Request) {
 		"id":     res.ID,
 		"answer": res.Answer,
 		"error":  res.Err,
+	})
+}
+
+// handleWait backs GET /wait?id=...&timeout=...: it blocks up to the
+// requested timeout (capped at waitMax) so the asking cli invocation can
+// deliver short-question answers inline.
+func (d *Daemon) handleWait(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	timeout := waitMax
+	if t, err := time.ParseDuration(r.URL.Query().Get("timeout")); err == nil && t > 0 && t < waitMax {
+		timeout = t
+	}
+	res, ok := d.Wait(id, timeout)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]string{"state": "pending"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"state":  "ready",
+		"id":     res.ID,
+		"answer": res.Answer,
+		"error":  res.Err,
+	})
+}
+
+// handleGetModel backs GET /model: the effective model plus the Text models
+// with quota left, read live from the quota database. curl-only, like /list.
+func (d *Daemon) handleGetModel(w http.ResponseWriter, r *http.Request) {
+	available, err := AvailableTextModels(d.cfg.QuotaDB)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"current":   d.currentModel(),
+			"available": []ModelInfo{},
+			"error":     err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current":   d.currentModel(),
+		"available": available,
+	})
+}
+
+// handlePutModel backs PUT /model: switch the model used for subsequent
+// jobs. The target must be one of the available Text models from the quota
+// database; the response mirrors GET /model.
+func (d *Daemon) handlePutModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Model) == "" {
+		slog.Warn("invalid put model request", "reason", "bad json body")
+		http.Error(w, `body should be {"model":"..."}`, http.StatusBadRequest)
+		return
+	}
+	available, err := AvailableTextModels(d.cfg.QuotaDB)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
+		return
+	}
+	usable := false
+	for _, m := range available {
+		if m.Model == req.Model {
+			usable = true
+			break
+		}
+	}
+	if !usable {
+		slog.Warn("model switch rejected", "model", req.Model)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":     "模型不在可用 Text 列表中：" + req.Model,
+			"available": available,
+		})
+		return
+	}
+	d.setModel(req.Model)
+	slog.Info("model switched", "model", req.Model)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current":   d.currentModel(),
+		"available": available,
 	})
 }
 

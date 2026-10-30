@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,20 +33,51 @@ func NewClient() *Client {
 	}}
 }
 
-// Submit sends one question to the daemon and returns its job id. When the
-// daemon is not running it is spawned detached and the put is retried once.
-func Submit(question string) (string, error) {
+// askWait is how long the cli blocks on a fresh question before giving up
+// and leaving the answer for a later bare invocation.
+const askWait = 5 * time.Second
+
+// Ask submits one question and blocks up to askWait for its answer: short
+// questions finish inside that window and come back immediately, while
+// longer ones return res == nil and keep processing daemon-side — a later
+// Fetch returns them. When the daemon is not running it is spawned detached
+// and the submit is retried once.
+func Ask(question string) (*Result, error) {
 	c := NewClient()
 	id, err := c.Put(question)
 	if err != nil {
 		if spawnErr := spawnDaemon(); spawnErr != nil {
-			return "", fmt.Errorf("aihelpmed 未运行且无法拉起（%v）：请先手动运行 aihelpmed", spawnErr)
+			return nil, fmt.Errorf("aihelpmed 未运行且无法拉起（%v）", spawnErr)
 		}
 		if id, err = c.Put(question); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
-	return id, nil
+	return c.Wait(id)
+}
+
+// Wait blocks up to askWait for the given job's result, or returns nil when
+// it is not ready in time (state "pending").
+func (c *Client) Wait(id string) (*Result, error) {
+	q := url.Values{"id": {id}, "timeout": {askWait.String()}}.Encode()
+	resp, err := c.http.Get("http://aihelpme/wait?" + q)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		State  string `json:"state"`
+		ID     string `json:"id"`
+		Answer string `json:"answer"`
+		Err    string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if out.State != "ready" {
+		return nil, nil
+	}
+	return &Result{ID: out.ID, Answer: out.Answer, Err: out.Err}, nil
 }
 
 // Fetch returns the newest finished result from the daemon, or nil when
@@ -57,7 +89,7 @@ func Fetch() (*Result, error) {
 	res, err := c.Get()
 	if err != nil {
 		if spawnErr := spawnDaemon(); spawnErr != nil {
-			return nil, fmt.Errorf("连接 aihelpmed 失败（%v）：请先手动运行 aihelpmed", err)
+			return nil, fmt.Errorf("连接 aihelpmed 失败（%v）", err)
 		}
 		if res, err = c.Get(); err != nil {
 			return nil, err
@@ -151,7 +183,7 @@ func daemonBinary() (string, error) {
 	}
 	p, err := exec.LookPath("aihelpmed")
 	if err != nil {
-		return "", fmt.Errorf("找不到 aihelpmed（make build 生成 bin/aihelpmed，或放入 PATH）")
+		return "", fmt.Errorf("找不到 aihelpmed")
 	}
 	return p, nil
 }
