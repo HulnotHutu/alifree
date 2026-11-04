@@ -1,6 +1,7 @@
 package aihelpme
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -22,6 +24,7 @@ type message struct {
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []message `json:"messages"`
+	Stream   bool      `json:"stream,omitempty"`
 }
 
 type chatResponse struct {
@@ -47,6 +50,109 @@ func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (s
 		messages = append([]message{{Role: "system", Content: cfg.SystemPrompt}}, messages...)
 	}
 	return chatCompletion(ctx, cfg, model, messages)
+}
+
+// chatCompletionStream is the streaming variant of chatCompletion: the API
+// is called with stream=true and every delta is forwarded to onDelta as it
+// arrives. It returns the accumulated answer and logs the full conversation
+// at the end, exactly like the blocking path. A mid-stream error yields the
+// partial answer plus the error.
+func chatCompletionStream(ctx context.Context, cfg *Config, model string, messages []message, onDelta func(string)) (answer string, err error) {
+	start := time.Now()
+	slog.Debug("api call start",
+		"model", model,
+		"workspace", cfg.WorkspaceID,
+		"stream", true,
+		"turns", len(messages))
+	defer func() {
+		if err != nil {
+			slog.Error("api call failed",
+				"model", model,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"err", err)
+			return
+		}
+		slog.Info("api call done",
+			"model", model,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"answer_chars", utf8.RuneCountInString(answer))
+		logConversation(model, messages, answer)
+	}()
+
+	apiKey := os.Getenv("DASHSCOPE_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("缺少 DASHSCOPE_API_KEY 环境变量")
+	}
+	body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: true})
+	if err != nil {
+		return "", err
+	}
+	url := fmt.Sprintf("https://%s.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions", cfg.WorkspaceID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: cfg.CallTimeout}).Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		var parsed chatResponse
+		if json.Unmarshal(raw, &parsed) == nil && parsed.Error != nil {
+			return "", fmt.Errorf("%s：%s", parsed.Error.Code, parsed.Error.Message)
+		}
+		return "", fmt.Errorf("HTTP %d：%s", resp.StatusCode, truncate(string(raw), 200))
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Error *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue // 无法解析的行（心跳等）直接跳过
+		}
+		if chunk.Error != nil {
+			return answer, fmt.Errorf("%s：%s", chunk.Error.Code, chunk.Error.Message)
+		}
+		for _, c := range chunk.Choices {
+			if c.Delta.Content != "" {
+				answer += c.Delta.Content
+				if onDelta != nil {
+					onDelta(c.Delta.Content)
+				}
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return answer, fmt.Errorf("读取流式响应失败：%w", err)
+	}
+	if answer == "" {
+		return "", fmt.Errorf("空响应（stream）")
+	}
+	return answer, nil
 }
 
 // chatCompletion is the daemon's only external call: one synchronous

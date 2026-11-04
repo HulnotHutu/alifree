@@ -18,6 +18,7 @@ type Config struct {
 	SystemPrompt string
 	CallTimeout  time.Duration
 	QuotaDB      string
+	Stream       bool
 }
 
 // configFile mirrors the yaml layout; CallTimeout stays a string so that
@@ -28,13 +29,15 @@ type configFile struct {
 	SystemPrompt string `yaml:"system_prompt"`
 	CallTimeout  string `yaml:"call_timeout"`
 	QuotaDB      string `yaml:"quota_db"`
+	Stream       bool   `yaml:"stream"`
 }
 
 const configExample = `workspace_id: <百炼 workspace id>
 model: deepseek-v4-flash-0731
 call_timeout: 10m              # 可选，默认 10m
 system_prompt: <回答风格提示词，可留空>
-quota_db: <quota 工具的 sqlite 路径，可选，启用 /model 接口>`
+quota_db: <quota 工具的 sqlite 路径，可选，启用 /model 接口>
+stream: false                  # 可选，true 时提问改为流式输出（重启生效）`
 
 // ConfigPath returns the config file location: $AIHELPME_CONFIG when set,
 // otherwise $XDG_CONFIG_HOME/aihelpme/config.yaml (usually
@@ -72,6 +75,7 @@ func LoadConfig() (*Config, error) {
 		Model:        strings.TrimSpace(f.Model),
 		SystemPrompt: strings.TrimSpace(f.SystemPrompt),
 		QuotaDB:      strings.TrimSpace(f.QuotaDB),
+		Stream:       f.Stream,
 	}
 	cfg.CallTimeout = 10 * time.Minute
 	if t := strings.TrimSpace(f.CallTimeout); t != "" {

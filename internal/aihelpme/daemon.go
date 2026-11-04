@@ -42,12 +42,18 @@ type Daemon struct {
 	results []*Result
 	working bool
 	notify  map[string]chan *Result // waiters blocked in Wait, by job id
+	streams map[string]chan string  // 流式模式的增量管道，by job id
 }
 
 // NewDaemon returns an empty daemon that calls the API with cfg; the
 // effective model starts at cfg.Model and can be switched via PUT /model.
 func NewDaemon(cfg *Config) *Daemon {
-	return &Daemon{cfg: cfg, model: cfg.Model, notify: map[string]chan *Result{}}
+	return &Daemon{
+		cfg:     cfg,
+		model:   cfg.Model,
+		notify:  map[string]chan *Result{},
+		streams: map[string]chan string{},
+	}
 }
 
 // currentModel returns the model used for the next job.
@@ -67,12 +73,16 @@ func (d *Daemon) setModel(m string) {
 // Put appends a question to the queue and returns its job id. A worker
 // goroutine starts on the spot if the daemon is idle; otherwise the
 // question waits for the running one. Waiters can await the outcome through
-// Wait.
+// Wait; in stream mode the deltas flow through the per-job channel exposed
+// by the /stream endpoint.
 func (d *Daemon) Put(question string) string {
 	j := &job{ID: newID(), Question: question}
 	ch := make(chan *Result, 1) // buffered: the worker never blocks on send
 	d.mu.Lock()
 	d.notify[j.ID] = ch
+	if d.cfg.Stream {
+		d.streams[j.ID] = make(chan string, 256)
+	}
 	d.queue = append(d.queue, j)
 	idle := !d.working
 	d.working = true
@@ -137,7 +147,25 @@ func (d *Daemon) work() {
 		slog.Info("job started", "job_id", j.ID, "model", model, "question_chars", utf8.RuneCountInString(j.Question))
 		start := time.Now()
 		res := &Result{ID: j.ID}
-		answer, err := ChatCompletion(context.Background(), d.cfg, model, j.Question)
+		var answer string
+		var err error
+		if d.cfg.Stream {
+			d.mu.Lock()
+			streamCh := d.streams[j.ID] // 一次性取出，闭包内不再碰 map（避免数据竞态）
+			d.mu.Unlock()
+			msgs := []message{{Role: "user", Content: j.Question}}
+			if d.cfg.SystemPrompt != "" {
+				msgs = append([]message{{Role: "system", Content: d.cfg.SystemPrompt}}, msgs...)
+			}
+			answer, err = chatCompletionStream(context.Background(), d.cfg, model, msgs, func(delta string) {
+				select {
+				case streamCh <- delta: // 慢客户端或已断开：丢块不阻塞 worker
+				default:
+				}
+			})
+		} else {
+			answer, err = ChatCompletion(context.Background(), d.cfg, model, j.Question)
+		}
 		if err != nil {
 			res.Err = err.Error()
 			slog.Error("job failed",
@@ -158,9 +186,14 @@ func (d *Daemon) work() {
 		d.results = append(d.results, res)
 		ch := d.notify[res.ID]
 		delete(d.notify, res.ID)
+		stream, ok := d.streams[res.ID]
+		delete(d.streams, res.ID)
 		d.mu.Unlock()
 		if ch != nil {
 			ch <- res // buffered(1): never blocks the worker
+		}
+		if ok {
+			close(stream) // 通知 /stream：生成结束
 		}
 	}
 }
@@ -182,6 +215,18 @@ func (d *Daemon) Get() (*Result, bool) {
 // waitMax caps how long a single /wait request may block the handler.
 const waitMax = time.Minute
 
+// resultByID looks up a stored result without removing it.
+func (d *Daemon) resultByID(id string) (*Result, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, res := range d.results {
+		if res.ID == id {
+			return res, true
+		}
+	}
+	return nil, false
+}
+
 // Serve handles cli connections on ln until it is closed: POST /put enqueues
 // a question, GET /wait blocks for one job's result, GET /get fetches the
 // newest finished answer, and GET /list reports the queue state with GET/PUT
@@ -192,6 +237,7 @@ func (d *Daemon) Serve(ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /put", d.handlePut)
 	mux.HandleFunc("GET /wait", d.handleWait)
+	mux.HandleFunc("GET /stream", d.handleStream)
 	mux.HandleFunc("GET /get", d.handleGet)
 	mux.HandleFunc("GET /list", d.handleList)
 	mux.HandleFunc("GET /model", d.handleGetModel)
@@ -234,6 +280,14 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
+// Flush forwards to the underlying writer so SSE handlers behind the
+// logging middleware keep their streaming behavior.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Question string `json:"question"`
@@ -248,7 +302,10 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `question empty, body should be {"question":"..."}`, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": d.Put(req.Question)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":     d.Put(req.Question),
+		"stream": d.cfg.Stream,
+	})
 }
 
 func (d *Daemon) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +405,63 @@ func (d *Daemon) handlePutModel(w http.ResponseWriter, r *http.Request) {
 		"current":   d.currentModel(),
 		"available": available,
 	})
+}
+
+// handleStream backs GET /stream?id=...: forward the job's answer deltas as
+// server-sent events while the worker generates them, then a final event
+// carrying the complete answer. Disconnecting only stops watching: the
+// worker keeps going and the answer lands in the fetch queue. Only
+// available when stream mode is on.
+func (d *Daemon) handleStream(w http.ResponseWriter, r *http.Request) {
+	if !d.cfg.Stream {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "stream 模式未开启（config.yaml: stream: true，改后重启）",
+		})
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	d.mu.Lock()
+	ch := d.streams[id]
+	d.mu.Unlock()
+	if ch == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "未知任务 " + id})
+		return
+	}
+	// resultByID 自带加锁，不能在持有 d.mu 时调用（Mutex 不可重入）
+	res, done := d.resultByID(id)
+	fl, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	fl.Flush()
+	emit := func(v map[string]any) {
+		b, _ := json.Marshal(v) // JSON 编码转义增量里的引号/换行
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		fl.Flush()
+	}
+	if done { // 连接前已生成完：直接给全文
+		emit(map[string]any{"done": true, "answer": res.Answer, "error": res.Err})
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return // 客户端走人：worker 继续算，结果照常入队
+		case delta, open := <-ch:
+			if !open {
+				if res2, ok := d.resultByID(id); ok {
+					emit(map[string]any{"done": true, "answer": res2.Answer, "error": res2.Err})
+				} else {
+					emit(map[string]any{"done": true, "error": "结果已被取走"})
+				}
+				return
+			}
+			emit(map[string]any{"t": delta})
+		}
+	}
 }
 
 // Status snapshots the queue: the ids waiting in submission order, whether

@@ -42,21 +42,34 @@ func exit(err error) {
 	}
 }
 
-// runPut validates and assembles the question and hands it to the daemon,
-// then blocks up to five seconds: short questions print their answer right
-// in this invocation, longer ones leave a wait hint on stderr and the
-// answer is fetched by a later bare invocation.
+// runPut validates and assembles the question and hands it to the daemon.
+// Blocking mode: it waits up to five seconds, short questions print their
+// answer right here, longer ones leave a wait hint on stderr. Stream mode:
+// the answer is printed as it is generated.
 func runPut(args []string) error {
 	question, err := readQuestion(args)
 	if err != nil {
 		return err
 	}
-	res, err := aihelpme.Ask(question)
+	streamed := false
+	res, err := aihelpme.Ask(question, func(delta string) {
+		streamed = true
+		fmt.Print(delta)
+	})
 	if err != nil {
 		return err
 	}
 	if res == nil {
 		fmt.Fprintln(os.Stderr, "仍在处理中，稍后运行 aihelpme 取回答")
+		return nil
+	}
+	if res.Err != "" {
+		return fmt.Errorf("任务失败：%s", res.Err)
+	}
+	if streamed {
+		if !strings.HasSuffix(res.Answer, "\n") {
+			fmt.Println()
+		}
 		return nil
 	}
 	return printResult(res)

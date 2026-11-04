@@ -80,6 +80,7 @@ workspace_id: llm-p317n4rywd1joyu3
 model: deepseek-v4-flash-0731
 call_timeout: 10m              # 可选，默认 10m
 quota_db: /home/hulut/note-space/dashscope-call/data/quota.db   # 可选，quota 工具 SQLite 路径，启用 /model 接口
+stream: false                  # 可选，true 时提问改为流式输出（重启生效）
 system_prompt: <回答风格提示词，可留空>
 ```
 
@@ -95,6 +96,13 @@ curl -X PUT --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock \
 ```
 
 `/model` 的可用列表来自 quota 工具的 SQLite（`main.model_quotas` 最新快照，路径由 `quota_db` 配置；`quota fetch --save` 刷新后即生效），只含剩余额度 > 0 的 Text 模型，按剩余降序；PUT 会校验目标在列表内，否则 400。切换保存在 daemon 内存，重启后回到 config.yaml 的 `model`。
+
+**流式模式**（`stream: true`，重启生效；默认关闭，保持阻塞异步语义）：提问后回答**逐字打印**到终端，不再有 5s 等待与"稍后取回"。实现为同一队列架构的另一种交付方式——worker 调 API（`stream: true`）边生成边把增量推进 per-job channel，新增 `GET /stream?id=` SSE 端点转发；Ctrl-C 只是停止观看，worker 继续算完，完整回答仍入结果队列（裸命令可再取回）；journald 对话日志照记。curl 体验：
+
+```bash
+ID=$(curl -s --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock -d '{"question":"你好"}' http://localhost/put | jq -r .id)
+curl -N --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock "http://localhost/stream?id=$ID"   # SSE 逐块
+```
 
 日志：daemon 走 slog，JSON 输出到 stderr，含时间与来源（文件：行号）；级别由 `AIHELPME_LOG_LEVEL` 控制（debug/info/warn/error，默认 info）。字段约定：`job_id`/`model`/`status`/`duration_ms` 标识上下文与结果，`err` 承载异常。请求入口/出口（`request start`/`request done`）、业务节点（`job started`/`job finished`）、外部调用（`api call start`/`done`/`failed`）、错误处理均有对应事件；每次调用成功后另有一条 `conversation` 记录完整对话（system、各轮、回答），多轮提示词测试可在 journald 里回溯。
 
