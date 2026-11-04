@@ -24,3 +24,6 @@ __pycache__/
 # 系统杂项
 .DS_Store
 Thumbs.db
+
+# ZCode 技能产物（架构图等生成物）
+/.archify/

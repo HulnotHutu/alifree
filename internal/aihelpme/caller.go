@@ -40,22 +40,27 @@ type chatResponse struct {
 // synchronously and returns the assistant reply for question, prepending
 // cfg.SystemPrompt when it is set. model is the effective model (it may
 // have been switched at runtime via PUT /model, so it comes in explicitly
-// instead of from cfg).
-//
-// The API key is read from the DASHSCOPE_API_KEY environment variable. The
-// HTTP client enforces cfg.CallTimeout, so a hung request surfaces as an
-// error instead of tying up the worker forever. A non-200 response, an
-// error payload, or an empty reply is returned as an error.
-//
-// This is the daemon's only external call, so start and outcome are logged
-// here (debug start, info done, error failed) regardless of which path
-// returns.
-func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (answer string, err error) {
+// instead of from cfg). See chatCompletion for the shared call semantics.
+func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (string, error) {
+	messages := []message{{Role: "user", Content: question}}
+	if cfg.SystemPrompt != "" {
+		messages = append([]message{{Role: "system", Content: cfg.SystemPrompt}}, messages...)
+	}
+	return chatCompletion(ctx, cfg, model, messages)
+}
+
+// chatCompletion is the daemon's only external call: one synchronous
+// compatible-mode request whose outcome is logged (debug start, info done,
+// error failed) no matter which path returns. The API key is read from
+// DASHSCOPE_API_KEY per call; cfg.CallTimeout bounds a hung request; a
+// non-200 response, an error payload, or an empty reply comes back as an
+// error.
+func chatCompletion(ctx context.Context, cfg *Config, model string, messages []message) (answer string, err error) {
 	start := time.Now()
 	slog.Debug("api call start",
 		"model", model,
 		"workspace", cfg.WorkspaceID,
-		"question_chars", utf8.RuneCountInString(question))
+		"turns", len(messages))
 	defer func() {
 		if err != nil {
 			slog.Error("api call failed",
@@ -68,15 +73,12 @@ func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (a
 			"model", model,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"answer_chars", utf8.RuneCountInString(answer))
+		logConversation(model, messages, answer)
 	}()
 
 	apiKey := os.Getenv("DASHSCOPE_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("缺少 DASHSCOPE_API_KEY 环境变量")
-	}
-	messages := []message{{Role: "user", Content: question}}
-	if cfg.SystemPrompt != "" {
-		messages = append([]message{{Role: "system", Content: cfg.SystemPrompt}}, messages...)
 	}
 	body, err := json.Marshal(chatRequest{Model: model, Messages: messages})
 	if err != nil {
@@ -114,6 +116,19 @@ func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (a
 		return "", fmt.Errorf("空响应（HTTP %d）", resp.StatusCode)
 	}
 	return parsed.Choices[0].Message.Content, nil
+}
+
+// logConversation emits the full exchange (system prompt, every
+// user/assistant turn, and the assistant reply) as one structured record.
+// Results live only in daemon memory, so this log line is the durable trace
+// of a prompt-test or job conversation, reviewable via journalctl.
+func logConversation(model string, messages []message, answer string) {
+	turns := make([]map[string]string, 0, len(messages)+1)
+	for _, m := range messages {
+		turns = append(turns, map[string]string{"role": m.Role, "content": m.Content})
+	}
+	turns = append(turns, map[string]string{"role": "assistant", "content": answer})
+	slog.Info("conversation", "model", model, "turns", turns)
 }
 
 func truncate(s string, n int) string {

@@ -96,7 +96,7 @@ curl -X PUT --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock \
 
 `/model` 的可用列表来自 quota 工具的 SQLite（`main.model_quotas` 最新快照，路径由 `quota_db` 配置；`quota fetch --save` 刷新后即生效），只含剩余额度 > 0 的 Text 模型，按剩余降序；PUT 会校验目标在列表内，否则 400。切换保存在 daemon 内存，重启后回到 config.yaml 的 `model`。
 
-日志：daemon 走 slog，JSON 输出到 stderr，含时间与来源（文件：行号）；级别由 `AIHELPME_LOG_LEVEL` 控制（debug/info/warn/error，默认 info）。字段约定：`job_id`/`model`/`status`/`duration_ms` 标识上下文与结果，`err` 承载异常。请求入口/出口（`request start`/`request done`）、业务节点（`job started`/`job finished`）、外部调用（`api call start`/`done`/`failed`）、错误处理均有对应事件。
+日志：daemon 走 slog，JSON 输出到 stderr，含时间与来源（文件：行号）；级别由 `AIHELPME_LOG_LEVEL` 控制（debug/info/warn/error，默认 info）。字段约定：`job_id`/`model`/`status`/`duration_ms` 标识上下文与结果，`err` 承载异常。请求入口/出口（`request start`/`request done`）、业务节点（`job started`/`job finished`）、外部调用（`api call start`/`done`/`failed`）、错误处理均有对应事件；每次调用成功后另有一条 `conversation` 记录完整对话（system、各轮、回答），多轮提示词测试可在 journald 里回溯。
 
 ## systemd 用户服务部署（aihelpmed）
 

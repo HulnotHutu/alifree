@@ -184,8 +184,8 @@ const waitMax = time.Minute
 
 // Serve handles cli connections on ln until it is closed: POST /put enqueues
 // a question, GET /wait blocks for one job's result, GET /get fetches the
-// newest finished answer, GET /list reports the queue state, and GET/PUT
-// /model views or switches the effective model (/list and /model are
+// newest finished answer, and GET /list reports the queue state with GET/PUT
+// /model viewing or switching the effective model (/list and /model are
 // curl-only, not wrapped by the cli). Every request passes through the
 // logging middleware.
 func (d *Daemon) Serve(ln net.Listener) error {
