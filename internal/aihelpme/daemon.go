@@ -37,6 +37,7 @@ type Result struct {
 type Daemon struct {
 	cfg     *Config
 	model   string // 当前生效的模型，PUT /model 可切换
+	prompt  string // 当前生效的 system prompt，PUT /prompt 可切换
 	mu      sync.Mutex
 	queue   []*job
 	results []*Result
@@ -46,11 +47,14 @@ type Daemon struct {
 }
 
 // NewDaemon returns an empty daemon that calls the API with cfg; the
-// effective model starts at cfg.Model and can be switched via PUT /model.
+// effective model starts at cfg.Model and the effective system prompt at
+// cfg.SystemPrompt, both switchable at runtime via PUT /model and
+// PUT /prompt.
 func NewDaemon(cfg *Config) *Daemon {
 	return &Daemon{
 		cfg:     cfg,
 		model:   cfg.Model,
+		prompt:  cfg.SystemPrompt,
 		notify:  map[string]chan *Result{},
 		streams: map[string]chan string{},
 	}
@@ -67,6 +71,21 @@ func (d *Daemon) currentModel() string {
 func (d *Daemon) setModel(m string) {
 	d.mu.Lock()
 	d.model = m
+	d.mu.Unlock()
+}
+
+// currentPrompt returns the system prompt used for the next job.
+func (d *Daemon) currentPrompt() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.prompt
+}
+
+// setPrompt replaces the system prompt used for subsequent jobs; an empty
+// string clears it, and no system message is sent.
+func (d *Daemon) setPrompt(p string) {
+	d.mu.Lock()
+	d.prompt = p
 	d.mu.Unlock()
 }
 
@@ -144,19 +163,20 @@ func (d *Daemon) work() {
 		d.mu.Unlock()
 
 		model := d.currentModel()
-		slog.Info("job started", "job_id", j.ID, "model", model, "question_chars", utf8.RuneCountInString(j.Question))
+		prompt := d.currentPrompt()
+		slog.Info("job started", "job_id", j.ID, "model", model, "prompt_chars", utf8.RuneCountInString(prompt), "question_chars", utf8.RuneCountInString(j.Question))
 		start := time.Now()
 		res := &Result{ID: j.ID}
 		var answer string
 		var err error
+		msgs := []message{{Role: "user", Content: j.Question}}
+		if prompt != "" {
+			msgs = append([]message{{Role: "system", Content: prompt}}, msgs...)
+		}
 		if d.cfg.Stream {
 			d.mu.Lock()
 			streamCh := d.streams[j.ID] // 一次性取出，闭包内不再碰 map（避免数据竞态）
 			d.mu.Unlock()
-			msgs := []message{{Role: "user", Content: j.Question}}
-			if d.cfg.SystemPrompt != "" {
-				msgs = append([]message{{Role: "system", Content: d.cfg.SystemPrompt}}, msgs...)
-			}
 			answer, err = chatCompletionStream(context.Background(), d.cfg, model, msgs, func(delta string) {
 				select {
 				case streamCh <- delta: // 慢客户端或已断开：丢块不阻塞 worker
@@ -164,7 +184,7 @@ func (d *Daemon) work() {
 				}
 			})
 		} else {
-			answer, err = ChatCompletion(context.Background(), d.cfg, model, j.Question)
+			answer, err = chatCompletion(context.Background(), d.cfg, model, msgs)
 		}
 		if err != nil {
 			res.Err = err.Error()
@@ -242,6 +262,8 @@ func (d *Daemon) Serve(ln net.Listener) error {
 	mux.HandleFunc("GET /list", d.handleList)
 	mux.HandleFunc("GET /model", d.handleGetModel)
 	mux.HandleFunc("PUT /model", d.handlePutModel)
+	mux.HandleFunc("GET /prompt", d.handleGetPrompt)
+	mux.HandleFunc("PUT /prompt", d.handlePutPrompt)
 	return (&http.Server{Handler: d.logRequests(mux)}).Serve(ln)
 }
 
@@ -462,6 +484,30 @@ func (d *Daemon) handleStream(w http.ResponseWriter, r *http.Request) {
 			emit(map[string]any{"t": delta})
 		}
 	}
+}
+
+// handleGetPrompt backs GET /prompt: the system prompt used for subsequent
+// jobs. curl-only, like /list.
+func (d *Daemon) handleGetPrompt(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"prompt": d.currentPrompt()})
+}
+
+// handlePutPrompt backs PUT /prompt: replace the system prompt used for
+// subsequent jobs. An empty string clears it — no system message is sent.
+// In-memory like PUT /model: a daemon restart falls back to config.yaml.
+// The response mirrors GET.
+func (d *Daemon) handlePutPrompt(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Prompt *string `json:"prompt"` // 指针区分「没给字段」和「显式清空」
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == nil {
+		slog.Warn("invalid put prompt request", "reason", "bad json body or missing prompt field")
+		http.Error(w, `body should be {"prompt":"..."}`, http.StatusBadRequest)
+		return
+	}
+	d.setPrompt(*req.Prompt)
+	slog.Info("prompt updated", "prompt_chars", utf8.RuneCountInString(*req.Prompt))
+	writeJSON(w, http.StatusOK, map[string]string{"prompt": d.currentPrompt()})
 }
 
 // Status snapshots the queue: the ids waiting in submission order, whether

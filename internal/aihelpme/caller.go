@@ -39,19 +39,6 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
-// ChatCompletion calls the OpenAI-compatible chat completions endpoint
-// synchronously and returns the assistant reply for question, prepending
-// cfg.SystemPrompt when it is set. model is the effective model (it may
-// have been switched at runtime via PUT /model, so it comes in explicitly
-// instead of from cfg). See chatCompletion for the shared call semantics.
-func ChatCompletion(ctx context.Context, cfg *Config, model, question string) (string, error) {
-	messages := []message{{Role: "user", Content: question}}
-	if cfg.SystemPrompt != "" {
-		messages = append([]message{{Role: "system", Content: cfg.SystemPrompt}}, messages...)
-	}
-	return chatCompletion(ctx, cfg, model, messages)
-}
-
 // chatCompletionStream is the streaming variant of chatCompletion: the API
 // is called with stream=true and every delta is forwarded to onDelta as it
 // arrives. It returns the accumulated answer and logs the full conversation
