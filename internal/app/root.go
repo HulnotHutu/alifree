@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -44,12 +45,14 @@ Bearer token 查询免费额度（详见 status.md）。`,
 
 func newFreetierCmd() *cobra.Command {
 	var (
-		enable   bool
-		disable  bool
-		asJSON   bool
-		ak, sk   string
-		stsToken string
-		envFile  string
+		enable    bool
+		disable   bool
+		allModels bool
+		asJSON    bool
+		ak, sk    string
+		stsToken  string
+		envFile   string
+		dbPath    string
 	)
 	cmd := &cobra.Command{
 		Use:   "freetier [模型名...]",
@@ -62,7 +65,8 @@ func newFreetierCmd() *cobra.Command {
 		Example: `  quota freetier                          # 查询全部有额度模型的状态
   quota freetier qwen3.8-flash            # 查询指定模型
   quota freetier --enable qwen3.8-max     # 开启（防超额）
-  quota freetier --disable qwen3.8-flash  # 关闭`,
+  quota freetier --disable qwen3.8-flash  # 关闭
+  quota freetier --enable --all           # 一次开启全部有额度模型（读最新快照）`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			creds := resolveCreds(ak, sk, stsToken, envFile)
 			if !creds.Complete() {
@@ -77,54 +81,129 @@ func newFreetierCmd() *cobra.Command {
 			case enable && disable:
 				return fmt.Errorf("--enable 与 --disable 不能同时使用")
 			case enable || disable:
-				if len(args) == 0 {
-					return fmt.Errorf("请指定要设置的模型名，例如：quota freetier --enable qwen3.8-max")
+				models := args
+				if allModels {
+					if len(models) > 0 {
+						return fmt.Errorf("--all 不能与模型名同时使用")
+					}
+					st, err := store.Open(dbPath)
+					if err != nil {
+						return err
+					}
+					defer st.Close()
+					_, snap, err := st.Latest()
+					if err != nil {
+						return fmt.Errorf("读取最新快照失败：%w（先运行 quota fetch --save）", err)
+					}
+					for _, m := range snap.Models {
+						models = append(models, m.Model)
+					}
+					if len(models) == 0 {
+						return fmt.Errorf("最新快照里没有模型")
+					}
 				}
-				raw, err := client.SetFreeTierOnly(ctx, args, enable)
-				if err != nil {
-					return err
+				if len(models) == 0 {
+					return fmt.Errorf("请指定要设置的模型名，或使用 --all 作用于全部有额度模型")
 				}
+
+				// 分批提交（每批 50 个），聚合任务结果
 				out := cmd.OutOrStdout()
 				action := map[bool]string{true: "开启", false: "关闭"}[enable]
-				if asJSON {
-					_ = encodeJSON(out, json.RawMessage(raw))
-					return nil
-				}
-				// 摘要：解析批量任务结果（successModels / failureModels）
-				var result struct {
-					SuccessModels []string `json:"successModels"`
-					FailureModels []string `json:"failureModels"`
-					SuccessCount  int      `json:"successCount"`
-					FailureCount  int      `json:"failureCount"`
-				}
-				if err := json.Unmarshal(raw, &result); err == nil && result.SuccessCount+result.FailureCount > 0 {
-					fmt.Fprintf(out, "已%s %d/%d 个模型的用完即停：成功 %s",
-						action, result.SuccessCount, result.SuccessCount+result.FailureCount,
-						strings.Join(result.SuccessModels, ", "))
-					if result.FailureCount > 0 {
-						fmt.Fprintf(out, "；失败 %s", strings.Join(result.FailureModels, ", "))
+				var success, failed []string
+				const batch = 50
+				for i := 0; i < len(models); i += batch {
+					end := i + batch
+					if end > len(models) {
+						end = len(models)
 					}
-					fmt.Fprintln(out)
-					return nil
+					raw, err := client.SetFreeTierOnly(ctx, models[i:end], enable)
+					if err != nil {
+						return err
+					}
+					var result struct {
+						SuccessModels []string `json:"successModels"`
+						FailureModels []string `json:"failureModels"`
+					}
+					if err := json.Unmarshal(raw, &result); err == nil {
+						success = append(success, result.SuccessModels...)
+						failed = append(failed, result.FailureModels...)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "已提交 %d/%d…\n", end, len(models))
 				}
-				fmt.Fprintf(out, "已提交%s任务（原始响应见 --json）\n%s\n", action, string(raw))
+
+				if asJSON {
+					return encodeJSON(out, map[string]any{
+						"action": action, "success": success, "failure": failed,
+					})
+				}
+				fmt.Fprintf(out, "已%s %d/%d 个模型的用完即停：成功 %s",
+					action, len(success), len(models), strings.Join(success, ", "))
+				if len(failed) > 0 {
+					fmt.Fprintf(out, "；失败 %s", strings.Join(failed, ", "))
+				}
+				fmt.Fprintln(out)
 				return nil
 			default:
-				raw, err := client.QueryFreeTierStatus(ctx, args)
+				// 按模型的用完即停状态（异步接口，五大类型各查一次）
+				status, err := client.QueryFreeTierOnly(ctx, bailian.DefaultModelTypes)
 				if err != nil {
-					return err
+					return fmt.Errorf("查询按模型状态失败：%w", err)
 				}
-				return encodeJSON(cmd.OutOrStdout(), json.RawMessage(raw))
+				// 指定模型时只显示这些模型
+				if len(args) > 0 {
+					filtered := map[string]bool{}
+					for _, a := range args {
+						v, ok := status[a]
+						if !ok {
+							return fmt.Errorf("模型 %s 没有免费额度记录，无法查询其用完即停状态", a)
+						}
+						filtered[a] = v
+					}
+					status = filtered
+				}
+				type row struct {
+					model   string
+					enabled bool
+				}
+				rows := make([]row, 0, len(status))
+				on := 0
+				for model, enabled := range status {
+					rows = append(rows, row{model, enabled})
+					if enabled {
+						on++
+					}
+				}
+				sort.Slice(rows, func(i, j int) bool {
+					if rows[i].enabled != rows[j].enabled {
+						return rows[i].enabled
+					}
+					return rows[i].model < rows[j].model
+				})
+				fmt.Fprintf(cmd.OutOrStdout(), "用完即停：开启 %d / 未开启 %d（共 %d 个模型）\n\n",
+					on, len(status)-on, len(status))
+				table := tablewriter.NewTable(cmd.OutOrStdout(),
+					tablewriter.WithHeader([]string{"model", "用完即停"}),
+				)
+				for _, r := range rows {
+					state := "未开启"
+					if r.enabled {
+						state = "开启"
+					}
+					table.Append([]string{r.model, state})
+				}
+				return table.Render()
 			}
 		},
 	}
 	cmd.Flags().BoolVar(&enable, "enable", false, "开启用完即停（防超额）")
 	cmd.Flags().BoolVar(&disable, "disable", false, "关闭用完即停")
+	cmd.Flags().BoolVar(&allModels, "all", false, "作用于最新快照里的全部有额度模型")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "附带原始 JSON 输出")
 	cmd.Flags().StringVar(&ak, "ak", "", "AccessKey ID（默认读环境变量）")
 	cmd.Flags().StringVar(&sk, "sk", "", "AccessKey Secret（默认读环境变量）")
 	cmd.Flags().StringVar(&stsToken, "sts", "", "STS 临时凭证（可选）")
 	cmd.Flags().StringVar(&envFile, "env-file", DefaultEnvFile(), "AK/SK 凭证文件")
+	cmd.Flags().StringVar(&dbPath, "db", DefaultDBPath(), "SQLite 库路径（--all 读取模型清单用）")
 	return cmd
 }
 

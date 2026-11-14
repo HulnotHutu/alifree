@@ -9,6 +9,8 @@ type ModelQuota struct {
 	Total            float64 `json:"total"`
 	RemainingPercent float64 `json:"remainingPercent"`
 	Expires          string  `json:"expires"`
+	// FreeTierOnly 为用完即停开关状态；nil 表示未知（旧快照或采集失败）。
+	FreeTierOnly *bool `json:"freeTierOnly,omitempty"`
 }
 
 // Summary 是快照的汇总信息。
@@ -32,6 +34,8 @@ type rawQuota struct {
 	QuotaInitTotal      float64 `json:"quotaInitTotal"`
 	QuotaValidityPeriod int64   `json:"quotaValidityPeriod"`
 	QuotaStatus         string  `json:"quotaStatus"`
+	// FreeTierOnly 仅在异步接口（needFreeTierOnlyStatus=true）的响应里出现。
+	FreeTierOnly bool `json:"freeTierOnly"`
 }
 
 // capabilityToType 把模型能力标签映射为展示类型（对齐官方 CLI usage/shared.ts）。

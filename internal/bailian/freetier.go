@@ -16,7 +16,15 @@ const (
 	FTStatusAPI   = "zeldaEasy.bailian-commerce.freeTrial.queryFreeTierInterceptStatus"
 	FTActivateAPI = "zeldaEasy.bailian-commerce.freeTrial.batchActivateFreeTierOnly"
 	FTDeactivate  = "zeldaEasy.bailian-commerce.freeTrial.batchDeactivateFreeTierOnly"
+
+	// FTQuotaAsyncAPI 是网页版异步额度接口；needFreeTierOnlyStatus=true 时
+	// 响应条目内联携带每个模型的用完即停开关（页面按 cookie 调用，
+	// CLI token 是否可用以实测为准）。
+	FTQuotaAsyncAPI = "zeldaEasy.bailian-commerce.freeTrial.queryFreeTierQuotaAsyn"
 )
+
+// DefaultModelTypes 是官方页面的五大模型类型（按类型查询用）。
+var DefaultModelTypes = []string{"Text", "Vision", "Multimodal", "Audio", "Embedding"}
 
 // FreeTierModel 是一个模型的用完即停状态。
 type FreeTierModel struct {
@@ -97,6 +105,75 @@ func (c *Client) QueryFreeTierStatus(ctx context.Context, models []string) (json
 		payload = map[string]any{"models": models}
 	}
 	return c.gatewayCall(ctx, token, FTStatusAPI, payload)
+}
+
+// QueryFreeTierOnly 按模型类型走异步额度接口，收集每个模型的用完即停开关。
+// 返回 map[模型名]开关状态。
+func (c *Client) QueryFreeTierOnly(ctx context.Context, modelTypes []string) (map[string]bool, error) {
+	token, err := c.GenerateCLIToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	status := map[string]bool{}
+	for _, mt := range modelTypes {
+		raw, err := c.gatewayCall(ctx, token, FTQuotaAsyncAPI, map[string]any{
+			"queryFreeTierQuotaRequest": map[string]any{
+				"modelType":              mt,
+				"needOverviewInfo":       false,
+				"needFreeTierOnlyStatus": true,
+				"returnUnissuedModels":   false,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", mt, err)
+		}
+		taskID := extractString(raw, "taskId")
+		if taskID == "" {
+			return nil, fmt.Errorf("%s: 未返回 taskId：%s", mt, raw)
+		}
+		var entries []rawQuota
+		for i := 0; i < 30; i++ {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Second):
+			}
+			poll, err := c.gatewayCall(ctx, token, FTQuotaAsyncAPI, map[string]any{
+				"queryFreeTierQuotaRequest": map[string]any{
+					"taskId": taskID, "returnUnissuedModels": false,
+				},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("%s 轮询: %w", mt, err)
+			}
+			if done, data := freeTierQuotaEntries(poll); done {
+				entries = data
+				break
+			}
+		}
+		for _, e := range entries {
+			status[e.Model] = e.FreeTierOnly
+		}
+	}
+	return status, nil
+}
+
+// freeTierQuotaEntries 判断异步轮询响应是否已含 freeTierQuotas 结果并解析。
+func freeTierQuotaEntries(raw json.RawMessage) (bool, []rawQuota) {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return false, nil
+	}
+	if v, ok := findKey(m, "freeTierQuotas"); ok {
+		if arr, ok := v.([]any); ok {
+			data, _ := json.Marshal(arr)
+			var entries []rawQuota
+			if json.Unmarshal(data, &entries) == nil {
+				return true, entries
+			}
+		}
+	}
+	return false, nil
 }
 
 // extractString 在多层信封里找首个指定键的字符串值。

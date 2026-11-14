@@ -94,6 +94,38 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	return s.migrateModelQuotasFreeTierOnly()
+}
+
+// migrateModelQuotasFreeTierOnly 为旧库补 free_tier_only 列
+// （-1 未知 / 0 未开启 / 1 开启），幂等。
+func (s *Store) migrateModelQuotasFreeTierOnly() error {
+	rows, err := s.db.Query(`PRAGMA table_info(model_quotas)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	has := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "free_tier_only" {
+			has = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !has {
+		_, err := s.db.Exec(
+			`ALTER TABLE model_quotas ADD COLUMN free_tier_only INTEGER NOT NULL DEFAULT -1`)
+		return err
+	}
 	return nil
 }
 
@@ -117,11 +149,18 @@ func (s *Store) Save(snap *bailian.Snapshot) (int64, error) {
 		return 0, err
 	}
 	for _, m := range snap.Models {
+		ft := -1 // 未知
+		if m.FreeTierOnly != nil {
+			ft = 0
+			if *m.FreeTierOnly {
+				ft = 1
+			}
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO model_quotas
-				(snapshot_id, model, type, remaining, total, remaining_percent, expires)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			id, m.Model, m.Type, m.Remaining, m.Total, m.RemainingPercent, m.Expires,
+				(snapshot_id, model, type, remaining, total, remaining_percent, expires, free_tier_only)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, m.Model, m.Type, m.Remaining, m.Total, m.RemainingPercent, m.Expires, ft,
 		); err != nil {
 			return 0, err
 		}
@@ -150,7 +189,7 @@ func (s *Store) Latest() (int64, *bailian.Snapshot, error) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT model, type, remaining, total, remaining_percent, expires
+		`SELECT model, type, remaining, total, remaining_percent, expires, free_tier_only
 		 FROM model_quotas WHERE snapshot_id = ?
 		 ORDER BY remaining_percent ASC, model ASC`, id,
 	)
@@ -167,9 +206,14 @@ func (s *Store) Latest() (int64, *bailian.Snapshot, error) {
 	}
 	for rows.Next() {
 		var m bailian.ModelQuota
+		var ft int
 		if err := rows.Scan(&m.Model, &m.Type, &m.Remaining, &m.Total,
-			&m.RemainingPercent, &m.Expires); err != nil {
+			&m.RemainingPercent, &m.Expires, &ft); err != nil {
 			return 0, nil, err
+		}
+		if ft == 0 || ft == 1 {
+			v := ft == 1
+			m.FreeTierOnly = &v
 		}
 		snap.Models = append(snap.Models, m)
 	}

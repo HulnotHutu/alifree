@@ -172,7 +172,18 @@ func (c *Client) Snapshot(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return BuildSnapshot(c.Now(), sourceURL(), types, quotas), nil
+	snap := BuildSnapshot(c.Now(), sourceURL(), types, quotas)
+	// 用完即停状态采集（异步接口，五大类型各一次）；失败不影响额度快照，
+	// 状态置为未知（看板显示 "—"）。
+	if ftStatus, err := c.QueryFreeTierOnly(ctx, DefaultModelTypes); err == nil {
+		for i := range snap.Models {
+			if v, ok := ftStatus[snap.Models[i].Model]; ok {
+				v := v
+				snap.Models[i].FreeTierOnly = &v
+			}
+		}
+	}
+	return snap, nil
 }
 
 func sourceURL() string {

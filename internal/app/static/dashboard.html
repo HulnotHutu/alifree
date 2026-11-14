@@ -127,7 +127,7 @@
   /* ---- 表格 ---- */
   .tableWrap { overflow-x: auto; background: var(--surface);
                border: 1px solid var(--line); border-radius: 8px; }
-  table { width: 100%; min-width: 780px; border-collapse: collapse; }
+  table { width: 100%; min-width: 860px; border-collapse: collapse; }
   thead th {
     text-align: left; font-size: 12.5px; font-weight: 550; color: var(--muted);
     padding: 9px 14px; border-bottom: 1px solid var(--line);
@@ -164,6 +164,13 @@
   .pctx { font-size: 12.5px; color: var(--muted); min-width: 46px; text-align: right; }
 
   td.expiry { white-space: nowrap; font-size: 13.5px; }
+  td.freetier { white-space: nowrap; }
+  .ftOn {
+    background: #E7F6EF; color: #0B7A55; border-radius: 4px;
+    padding: 1.5px 7px; font-size: 12px; font-weight: 550;
+  }
+  .ftOff { color: var(--faint); font-size: 12.5px; }
+  .ftUnknown { color: var(--faint); }
   .rel { margin-left: 7px; font-size: 12.5px; color: var(--muted); }
   .rel.soon { color: var(--bad); font-weight: 550; }
   .rel.warn30 { color: var(--warn); }
@@ -284,6 +291,7 @@
         <th class="sortable num" data-key="total" scope="col">总量</th>
         <th class="sortable" data-key="pct" scope="col">剩余比例</th>
         <th class="sortable" data-key="days" scope="col">到期</th>
+        <th class="sortable" data-key="freetier" scope="col">用完即停</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -320,7 +328,7 @@
     "已过期": r => r.expired,
     "全部":   () => true,
   };
-  const DEFAULT_SORT = { model: 1, remaining: -1, total: -1, pct: 1, days: 1 };
+  const DEFAULT_SORT = { model: 1, remaining: -1, total: -1, pct: 1, days: 1, freetier: 1 };
 
   const state = {
     data: null, meta: null, types: [], history: null,
@@ -411,6 +419,12 @@
     return `${esc(r.expires)}<span class="rel ${cls}">${rel}</span>`;
   }
 
+  function freetierHtml(r) {
+    if (r.freeTierOnly === true) return `<span class="ftOn">开启</span>`;
+    if (r.freeTierOnly === false) return `<span class="ftOff">未开启</span>`;
+    return `<span class="ftUnknown">—</span>`;
+  }
+
   function currentRows() {
     const q = state.q, f = QUICK[state.quick];
     const rows = state.data.models.filter(r =>
@@ -422,6 +436,7 @@
       total: r => r.total,
       pct: r => r.pct,
       days: r => r.expired ? 1e9 : (r.days === null ? 1e8 : r.days),
+      freetier: r => r.freeTierOnly === true ? 0 : (r.freeTierOnly === false ? 1 : 2),
     };
     const k = state.sortKey, d = state.sortDir;
     rows.sort((a, b) => {
@@ -450,6 +465,7 @@
           <span class="pctx">${r.pct.toFixed(1)}%</span>
         </div></td>
         <td class="expiry">${expiryHtml(r)}</td>
+        <td class="freetier">${freetierHtml(r)}</td>
       </tr>`).join("");
     $("#count").textContent = `显示 ${all.length} / ${state.data.models.length} 个模型`;
     renderPager(all.length, totalPages);
