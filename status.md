@@ -147,3 +147,26 @@ AK/SK 的合规获取（阿里云 RAM 文档）：
 二者在 API 里 quotaStatus=VALID、额度真实存在，但官方页面**搜不到**（返回"暂无数据"）。原因：网页版接口按 modelType（Text/Vision/Audio/Embedding/Multimodal）分类查询，这两个 realtime 模型的能力标签无法归入任何类型（在工具数据里 type 同样是 "-"），官方页面按类型遍历时把它们漏掉了。
 
 结论：**按模型名逐个查额度的工具链路比官方页面更全**；官方数字可作为下界交叉验证。同日其余 72 个模型与官方页面逐一吻合。
+
+## 「用完即停」实现机制（2026-11-14 页面现场捕获）
+
+官方页 notice：开启后免费额度用尽即停止服务（403 错误码 `AllocationQuota.FreeTierOnly.`），不转计费；关闭则用尽后按量付费。免费额度为中国内地所有业务空间共享。
+
+**查询**：网页版用 `queryFreeTierQuotaAsyn`（cookie 认证）按 modelType 五类各发一次，请求带
+`{modelType, needOverviewInfo: true, needFreeTierOnlyStatus: true, returnUnissuedModels: false}`，
+再按 taskId 轮询取结果 —— 开关状态随额度条目内联返回，无需单独查询。
+（CLI 侧另有同步接口 `queryFreeTierInterceptStatus`，见 `bl usage freetier`。）
+
+**写入**（浏览器 fetch/XHR 钩子现场捕获，qwen3.8-flash 开→关→开）：
+- 开启：`zeldaEasy.bailian-commerce.freeTrial.batchActivateFreeTierOnly`
+  body: `{"BatchActivateFreeTierOnlyRequest":{"models":["qwen3.8-flash"]}}` → taskId → 轮询
+- 关闭：`zeldaEasy.bailian-commerce.freeTrial.batchDeactivateFreeTierOnly`
+  body: `{"BatchDeactivateFreeTierOnlyRequest":{"models":["qwen3.8-flash"]}}` → taskId → 轮询
+- 均为批量异步任务模式（页面「批量设置」多选同理）；关闭方向强制弹确认框
+  「关闭后，您将为免费额度用尽后产生的用量付费」。
+
+**生效层**：开关存 commerce 侧，推理网关在计量时检查 —— 开启且 `quotaTotal=0` 时直接拒绝
+（403 `AllocationQuota.FreeTierOnly.`），不透传到计费。客户端/SDK 无感知，仅靠错误码区分。
+
+**对照**：我们的同步查询（`queryFreeTierQuota`，CLI 链路）响应不含 freeTierOnly 字段；
+看板如需展示该列，可调 `queryFreeTierInterceptStatus` 或改用带 `needFreeTierOnlyStatus` 的查询。
