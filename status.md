@@ -136,3 +136,14 @@ AK/SK 的合规获取（阿里云 RAM 文档）：
 3. **百炼业务空间成员** —— 百炼控制台「管理 → 账号管理 → 添加用户」把 RAM 用户加入业务空间，页面权限勾「模型用量&免费额度-操作」（本次直接全选 38 项）；缺它时网关返回 `BailianGateway.Team.NotAuthorised`（token 能换到，但网关拒绝）。
 
 **端到端真实验证通过**：Go 工具（ACS3 签名 → GenerateCLIAccessToken → listFoundationModels → queryFreeTierQuota → SQLite）取回 370 个模型、79 个有额度，快照 #2 入库，看板显示「刚刚更新」。与 10 天前主账号快照（82 个有额度）交叉一致：差额来自期间到期的额度。
+
+## 与官方控制台页面交叉验证（2026-11-14）
+
+官方「费用用量 → 免费额度」页面显示有额度模型 **72** 个，lite/Go 工具同期抓到 **74** 个。全量翻页比对（72 行逐页收集）+ 官方页内搜索证实，多出的 2 个是：
+
+- `qwen-audio-3.1-realtime-flash`（1M/1M，2027-01-26 到期）
+- `qwen-audio-3.1-realtime-plus`（1M/1M，2026-12-18 到期）
+
+二者在 API 里 quotaStatus=VALID、额度真实存在，但官方页面**搜不到**（返回"暂无数据"）。原因：网页版接口按 modelType（Text/Vision/Audio/Embedding/Multimodal）分类查询，这两个 realtime 模型的能力标签无法归入任何类型（在工具数据里 type 同样是 "-"），官方页面按类型遍历时把它们漏掉了。
+
+结论：**按模型名逐个查额度的工具链路比官方页面更全**；官方数字可作为下界交叉验证。同日其余 72 个模型与官方页面逐一吻合。
