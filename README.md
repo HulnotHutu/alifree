@@ -72,6 +72,19 @@ aihelpme                                   # get：无输入即取最新回答�
 ./bin/quota history          # 查看最近的抓取记录
 ```
 
+### 用完即停（freetier）
+
+控制模型的「用完即停」开关：开启后该模型免费额度用尽时推理网关直接返回 403（`AllocationQuota.FreeTierOnly.`），**不会转按量计费**——防止超额调用的第一道闸门。写入为批量异步任务（提交 models → taskId → 自动轮询确认）：
+
+```bash
+./bin/quota freetier                       # 查询账户级拦截标志
+./bin/quota freetier qwen3.8-flash         # 查询指定模型状态
+./bin/quota freetier --enable qwen3.8-max  # 开启（防超额，推荐）
+./bin/quota freetier --disable kimi-k3     # 关闭（额度用尽后转按量计费）
+```
+
+注意：`--disable` 后免费额度用尽即产生真实费用；开关状态也可在官方控制台「费用用量 → 免费额度」页核对。
+
 文本输出示例：
 
 ```text

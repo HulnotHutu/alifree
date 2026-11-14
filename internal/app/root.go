@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/olekukonko/tablewriter"
@@ -36,8 +38,94 @@ Bearer token 查询免费额度（详见 status.md）。`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newFetchCmd(), newServeCmd(), newHistoryCmd())
+	root.AddCommand(newFetchCmd(), newServeCmd(), newHistoryCmd(), newFreetierCmd())
 	return root
+}
+
+func newFreetierCmd() *cobra.Command {
+	var (
+		enable   bool
+		disable  bool
+		asJSON   bool
+		ak, sk   string
+		stsToken string
+		envFile  string
+	)
+	cmd := &cobra.Command{
+		Use:   "freetier [模型名...]",
+		Short: "查询或设置模型的「用完即停」开关",
+		Long: `「用完即停」开启后，该模型免费额度用尽时推理网关直接返回 403
+（AllocationQuota.FreeTierOnly.），不会转按量计费——适合防止超额调用。
+
+不带参数时查询指定模型（或全部有额度模型）的开关状态；
+--enable / --disable 批量设置（写入为异步批量任务，提交后自动轮询）。`,
+		Example: `  quota freetier                          # 查询全部有额度模型的状态
+  quota freetier qwen3.8-flash            # 查询指定模型
+  quota freetier --enable qwen3.8-max     # 开启（防超额）
+  quota freetier --disable qwen3.8-flash  # 关闭`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds := resolveCreds(ak, sk, stsToken, envFile)
+			if !creds.Complete() {
+				return fmt.Errorf("缺少凭证：请设置 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET（或用 --env-file 指定凭证文件）")
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			client := bailian.NewClient(creds.AK, creds.SK, creds.STS)
+
+			switch {
+			case enable && disable:
+				return fmt.Errorf("--enable 与 --disable 不能同时使用")
+			case enable || disable:
+				if len(args) == 0 {
+					return fmt.Errorf("请指定要设置的模型名，例如：quota freetier --enable qwen3.8-max")
+				}
+				raw, err := client.SetFreeTierOnly(ctx, args, enable)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				action := map[bool]string{true: "开启", false: "关闭"}[enable]
+				if asJSON {
+					_ = encodeJSON(out, json.RawMessage(raw))
+					return nil
+				}
+				// 摘要：解析批量任务结果（successModels / failureModels）
+				var result struct {
+					SuccessModels []string `json:"successModels"`
+					FailureModels []string `json:"failureModels"`
+					SuccessCount  int      `json:"successCount"`
+					FailureCount  int      `json:"failureCount"`
+				}
+				if err := json.Unmarshal(raw, &result); err == nil && result.SuccessCount+result.FailureCount > 0 {
+					fmt.Fprintf(out, "已%s %d/%d 个模型的用完即停：成功 %s",
+						action, result.SuccessCount, result.SuccessCount+result.FailureCount,
+						strings.Join(result.SuccessModels, ", "))
+					if result.FailureCount > 0 {
+						fmt.Fprintf(out, "；失败 %s", strings.Join(result.FailureModels, ", "))
+					}
+					fmt.Fprintln(out)
+					return nil
+				}
+				fmt.Fprintf(out, "已提交%s任务（原始响应见 --json）\n%s\n", action, string(raw))
+				return nil
+			default:
+				raw, err := client.QueryFreeTierStatus(ctx, args)
+				if err != nil {
+					return err
+				}
+				return encodeJSON(cmd.OutOrStdout(), json.RawMessage(raw))
+			}
+		},
+	}
+	cmd.Flags().BoolVar(&enable, "enable", false, "开启用完即停（防超额）")
+	cmd.Flags().BoolVar(&disable, "disable", false, "关闭用完即停")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "附带原始 JSON 输出")
+	cmd.Flags().StringVar(&ak, "ak", "", "AccessKey ID（默认读环境变量）")
+	cmd.Flags().StringVar(&sk, "sk", "", "AccessKey Secret（默认读环境变量）")
+	cmd.Flags().StringVar(&stsToken, "sts", "", "STS 临时凭证（可选）")
+	cmd.Flags().StringVar(&envFile, "env-file", DefaultEnvFile(), "AK/SK 凭证文件")
+	return cmd
 }
 
 func newFetchCmd() *cobra.Command {
