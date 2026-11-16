@@ -1,6 +1,10 @@
 # Go 构建产物
 /bin/
 
+# React 前端（web-ui/）
+web-ui/node_modules/
+web-ui/dist/
+
 # 本地数据（SQLite 看板库，运行时生成）
 /data/
 *.db
