@@ -184,12 +184,13 @@ function TextTab({ models, Err, Latency }: {
   Latency: (p: { out: InferEnvelope | null }) => React.ReactNode;
 }) {
   const [model, setModel] = useState(models[0]?.model ?? "");
-  const [prompt, setPrompt] = useState("用一句话解释什么是“免费额度用完即停”。");
+  const [prompt, setPrompt] = useState("");
   const [out, setOut] = useState<InferEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
 
   function run() {
     if (!model) return;
+    if (!prompt.trim()) { setOut({ ok: false, error: "请输入提示词。" }); return; }
     setLoading(true); setOut(null);
     inferChat({ model, messages: [{ role: "user", content: prompt }] })
       .then(setOut)
@@ -203,7 +204,8 @@ function TextTab({ models, Err, Latency }: {
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
                 options={models.map(modelOption)} />
-        <TextField label="提示词" value={prompt} onChange={setPrompt} />
+        <TextField label="提示词" value={prompt} onChange={setPrompt}
+                placeholder="请输入提示词，例如：用一句话介绍你自己" />
         <Button type="primary" icon={<SendOutlined />} loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           发送
         </Button>
@@ -225,13 +227,14 @@ function VisionTab({ models, Err, Latency }: {
   Latency: (p: { out: InferEnvelope | null }) => React.ReactNode;
 }) {
   const [model, setModel] = useState(models[0]?.model ?? "");
-  const [prompt, setPrompt] = useState("一只戴着宇航员头盔的橘猫，漂浮在星云中，赛博朋克风格");
+  const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState("1024*1024");
   const [out, setOut] = useState<InferEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
   const kind = VIDEO_MODELS.has(model) ? "video" : "image";
 
   function run() {
+    if (!prompt.trim()) { setOut({ ok: false, error: "请输入画面描述。" }); return; }
     setLoading(true); setOut(null);
     inferImageGen({ model, prompt, size, kind: kind as "image" | "video" })
       .then(setOut)
@@ -245,7 +248,8 @@ function VisionTab({ models, Err, Latency }: {
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型（图像生成 / 视频生成）</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
                 options={models.map(modelOption)} />
-        <TextField label="画面描述" value={prompt} onChange={setPrompt} />
+        <TextField label="画面描述" value={prompt} onChange={setPrompt}
+                placeholder="例如：一只戴着宇航员头盔的橘猫，漂浮在星云中，赛博朋克风格" />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>尺寸</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={size} onChange={setSize}
                 options={["1024*1024", "720*1280", "1280*720"].map((v) => ({ value: v, label: v.replace("*", "×") }))} />
@@ -275,7 +279,7 @@ function MultimodalTab({ models, Err, Latency }: {
   Latency: (p: { out: InferEnvelope | null }) => React.ReactNode;
 }) {
   const [model, setModel] = useState(models[0]?.model ?? "");
-  const [prompt, setPrompt] = useState("请用两句话描述这张图片。");
+  const [prompt, setPrompt] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [out, setOut] = useState<InferEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
@@ -289,6 +293,7 @@ function MultimodalTab({ models, Err, Latency }: {
         const dataUrl = await fileToBase64(file);
         content.push({ type: "image_url", image_url: { url: dataUrl } });
       }
+      if (!prompt.trim()) throw new Error("请输入提问。");
       content.push({ type: "text", text: prompt });
       const out = await inferChat({ model, messages: [{ role: "user", content }], modalities: ["text"] });
       setOut(out);
@@ -317,7 +322,8 @@ function MultimodalTab({ models, Err, Latency }: {
           <InboxOutlined style={{ fontSize: 32, color: "#98A2B3" }} />
           <Typography.Paragraph style={{ margin: "8px 0 0" }}>点击或拖拽图片到这里</Typography.Paragraph>
         </Upload.Dragger>
-        <TextField label="提问" value={prompt} onChange={setPrompt} />
+        <TextField label="提问" value={prompt} onChange={setPrompt}
+                placeholder="例如：请用两句话描述这张图片。" />
         <Button type="primary" icon={<SendOutlined />} loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           发送
         </Button>
@@ -336,7 +342,7 @@ function AudioTab({ models, Err, Latency }: {
   Latency: (p: { out: InferEnvelope | null }) => React.ReactNode;
 }) {
   const [model, setModel] = useState(models[0]?.model ?? "");
-  const [prompt, setPrompt] = useState("请把这段语音转写成文字。");
+  const [prompt, setPrompt] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [out, setOut] = useState<InferEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
@@ -385,7 +391,8 @@ function AudioTab({ models, Err, Latency }: {
           <InboxOutlined style={{ fontSize: 32, color: "#98A2B3" }} />
           <Typography.Paragraph style={{ margin: "8px 0 0" }}>点击或拖拽音频到这里</Typography.Paragraph>
         </Upload.Dragger>
-        <TextField label="附加指令（可选）" value={prompt} onChange={setPrompt} rows={2} />
+        <TextField label="附加指令（可选）" value={prompt} onChange={setPrompt} rows={2}
+                placeholder="可选：例如 请把这段语音转写成文字" />
         <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           识别
         </Button>
@@ -404,8 +411,8 @@ function EmbeddingTab({ models, Err, Latency }: {
   Latency: (p: { out: InferEnvelope | null }) => React.ReactNode;
 }) {
   const [model, setModel] = useState(models[0]?.model ?? "");
-  const [a, setA] = useState("阿里巴巴的百炼平台提供大模型服务。");
-  const [b, setB] = useState("阿里云上可以调用通义千问系列的模型。");
+  const [a, setA] = useState("");
+  const [b, setB] = useState("");
   const [out, setOut] = useState<InferEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -427,8 +434,10 @@ function EmbeddingTab({ models, Err, Latency }: {
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
                 options={models.map(modelOption)} />
-        <TextField label="文本 A" value={a} onChange={setA} />
-        <TextField label="文本 B" value={b} onChange={setB} rows={2} />
+        <TextField label="文本 A" value={a} onChange={setA}
+                placeholder="输入第一段文本，例如：阿里巴巴的百炼平台提供大模型服务" />
+        <TextField label="文本 B" value={b} onChange={setB} rows={2}
+                placeholder="输入第二段文本，例如：阿里云上可以调用通义千问系列的模型" />
         <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           计算向量与相似度
         </Button>
