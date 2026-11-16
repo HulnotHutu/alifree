@@ -131,50 +131,57 @@ func (s *server) handleInferImageGen(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := dashscope.New()
-	var taskID string
-	var err error
-	maxWait := 120 * time.Second
 	if req.Kind == "video" {
-		taskID, err = client.CreateVideoTask(r.Context(), key, req.Model, req.Prompt)
-		maxWait = 300 * time.Second
-	} else {
-		taskID, err = client.CreateImageTask(r.Context(), key, req.Model, req.Prompt, req.Size)
-	}
-	if err != nil {
-		writeJSON(w, http.StatusOK, inferErr(err))
-		return
-	}
-
-	deadline := time.Now().Add(maxWait)
-	start := time.Now()
-	for time.Now().Before(deadline) {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
-		res, err := client.PollTask(r.Context(), key, taskID)
+		// 视频生成：异步任务，提交后轮询（最长 5 分钟）
+		taskID, err := client.CreateVideoTask(r.Context(), key, req.Model, req.Prompt)
 		if err != nil {
 			writeJSON(w, http.StatusOK, inferErr(err))
 			return
 		}
-		switch res.Status {
-		case "SUCCEEDED":
-			writeJSON(w, http.StatusOK, inferEnvelope{OK: true,
-				Data:      mustJSON(map[string]any{"urls": res.URLs, "taskId": taskID}),
-				LatencyMs: time.Since(start).Milliseconds()})
-			return
-		case "FAILED", "CANCELED", "UNKNOWN":
-			msg := res.Message
-			if msg == "" {
-				msg = "任务失败：" + res.Status
+		maxWait := 300 * time.Second
+		start := time.Now()
+		deadline := time.Now().Add(maxWait)
+		for time.Now().Before(deadline) {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(3 * time.Second):
 			}
-			writeJSON(w, http.StatusOK, inferEnvelope{OK: false, Error: msg, Code: res.Status})
-			return
+			res, err := client.PollTask(r.Context(), key, taskID)
+			if err != nil {
+				writeJSON(w, http.StatusOK, inferErr(err))
+				return
+			}
+			switch res.Status {
+			case "SUCCEEDED":
+				writeJSON(w, http.StatusOK, inferEnvelope{OK: true,
+					Data:      mustJSON(map[string]any{"urls": res.URLs, "taskId": taskID}),
+					LatencyMs: time.Since(start).Milliseconds()})
+				return
+			case "FAILED", "CANCELED", "UNKNOWN":
+				msg := res.Message
+				if msg == "" {
+					msg = "任务失败：" + res.Status
+				}
+				writeJSON(w, http.StatusOK, inferEnvelope{OK: false, Error: msg, Code: res.Status})
+				return
+			}
 		}
+		writeJSON(w, http.StatusOK, inferEnvelope{OK: false,
+			Error: fmt.Sprintf("生成超时（>%v），任务 %s 可能仍在执行，可稍后在控制台查看", maxWait, taskID)})
+		return
 	}
-	writeJSON(w, http.StatusOK, inferEnvelope{OK: false,
-		Error: fmt.Sprintf("生成超时（>%v），任务 %s 可能仍在执行，可稍后在控制台查看", maxWait, taskID)})
+
+	// 图像生成（qwen-image 2.x）：同步接口，直接返回图片 URL
+	start := time.Now()
+	imageURL, err := client.GenerateImage(r.Context(), key, req.Model, req.Prompt, req.Size)
+	if err != nil {
+		writeJSON(w, http.StatusOK, inferErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, inferEnvelope{OK: true,
+		Data:      mustJSON(map[string]any{"urls": []string{imageURL}}),
+		LatencyMs: time.Since(start).Milliseconds()})
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {

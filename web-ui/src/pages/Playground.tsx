@@ -228,7 +228,7 @@ function VisionTab({ models, Err, Latency }: {
 }) {
   const [model, setModel] = useState(models[0]?.model ?? "");
   const [prompt, setPrompt] = useState("");
-  const [size, setSize] = useState("1024*1024");
+  const [size, setSize] = useState("");
   const [out, setOut] = useState<InferEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
   const kind = VIDEO_MODELS.has(model) ? "video" : "image";
@@ -252,7 +252,13 @@ function VisionTab({ models, Err, Latency }: {
                 placeholder="例如：一只戴着宇航员头盔的橘猫，漂浮在星云中，赛博朋克风格" />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>尺寸</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={size} onChange={setSize}
-                options={["1024*1024", "720*1280", "1280*720"].map((v) => ({ value: v, label: v.replace("*", "×") }))} />
+                options={[
+                  { value: "", label: "跟随模型默认" },
+                  { value: "2048*2048", label: "2048×2048（1:1）" },
+                  { value: "2688*1536", label: "2688×1536（16:9）" },
+                  { value: "1536*2688", label: "1536×2688（9:16）" },
+                  { value: "1728*2368", label: "1728×2368（3:4）" },
+                ]} />
         <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           生成{kind === "video" ? "视频（1–4 分钟）" : "图片（10–30 秒）"}
         </Button>
@@ -353,14 +359,13 @@ function AudioTab({ models, Err, Latency }: {
     setLoading(true); setOut(null);
     try {
       const dataUrl = await fileToBase64(file);
-      const base64 = dataUrl.split(",")[1] || "";
-      const format = file.name.toLowerCase().endsWith(".mp3") ? "mp3" : "wav";
+      // 官方要求 data 为完整 Data URI：data:audio/wav;base64,<data>，不支持裸 base64
       const out = await inferChat({
         model,
         messages: [{
           role: "user",
           content: [
-            { type: "input_audio", input_audio: { data: base64, format } },
+            { type: "input_audio", input_audio: { data: dataUrl } },
             { type: "text", text: prompt },
           ],
         }],

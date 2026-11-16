@@ -55,7 +55,8 @@ export interface ChatMessage {
     | Array<
         | { type: "text"; text: string }
         | { type: "image_url"; image_url: { url: string } }
-        | { type: "input_audio"; input_audio: { data: string; format: string } }
+        // 官方协议：data 为完整 Data URI（data:audio/wav;base64,…）或音频 URL，无 format 字段
+        | { type: "input_audio"; input_audio: { data: string; format?: string } }
       >;
 }
 

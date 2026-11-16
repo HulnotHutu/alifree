@@ -119,21 +119,51 @@ func (c *Client) Embeddings(ctx context.Context, key, model string, inputs []str
 
 // --- 图像/视频生成：创建异步任务 + 轮询 -------------------------------------
 
-// CreateImageTask 创建文生图任务（qwen-image 系列，异步）。
-func (c *Client) CreateImageTask(ctx context.Context, key, model, prompt, size string) (string, error) {
+// GenerateImage 文生图（qwen-image 2.x 系列，同步接口直接返回图片 URL）。
+// 端点：/api/v1/services/aigc/multimodal-generation/generation；
+// 图片地址在 output.choices[0].message.content[].image（PNG，24h 有效）。
+// size 形如 "2048*2048"，留空走服务端默认。
+func (c *Client) GenerateImage(ctx context.Context, key, model, prompt, size string) (string, error) {
 	parameters := map[string]any{}
 	if size != "" {
 		parameters["size"] = size
 	}
 	raw, err := c.do(ctx, http.MethodPost,
-		"/api/v1/services/aigc/text2image/image-synthesis", key, map[string]any{
-			"model": model, "input": map[string]any{"prompt": prompt},
+		"/api/v1/services/aigc/multimodal-generation/generation", key, map[string]any{
+			"model": model,
+			"input": map[string]any{
+				"messages": []map[string]any{{
+					"role":    "user",
+					"content": []map[string]any{{"text": prompt}},
+				}},
+			},
 			"parameters": parameters,
-		}, map[string]string{"X-DashScope-Async": "enable"})
+		})
 	if err != nil {
 		return "", err
 	}
-	return extractTaskID(raw)
+	var out struct {
+		Output struct {
+			Choices []struct {
+				Message struct {
+					Content []struct {
+						Image string `json:"image"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	for _, choice := range out.Output.Choices {
+		for _, part := range choice.Message.Content {
+			if part.Image != "" {
+				return part.Image, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("响应中没有图片 URL：%s", raw)
 }
 
 // CreateVideoTask 创建视频生成任务（wan 系列，异步）。
