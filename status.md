@@ -170,3 +170,35 @@ AK/SK 的合规获取（阿里云 RAM 文档）：
 
 **对照**：我们的同步查询（`queryFreeTierQuota`，CLI 链路）响应不含 freeTierOnly 字段；
 看板如需展示该列，可调 `queryFreeTierInterceptStatus` 或改用带 `needFreeTierOnlyStatus` 的查询。
+
+## 测试台对齐官方 SDK 文档：7 类模型调用形状（2026-11-17）
+
+`install-sdk` 页「后续步骤」给出 7 类模型文档入口（文本/图像/视频/语音合成/语音识别/向量/排序），
+测试台按此补齐为 7 个标签页。逐页核对结论：
+
+- **文本**：OpenAI 兼容 `/compatible-mode/v1/chat/completions`，temperature/top_p/max_tokens/
+  enable_thinking 等官方参数直接放请求体顶层（前端透传）。
+- **图像**：qwen-image 2.x 为**同步** `/api/v1/services/aigc/multimodal-generation/generation`，
+  图片在 `output.choices[0].message.content[].image`；parameters：size/negative_prompt/watermark/prompt_extend/seed。
+- **视频**：wan3.0 **异步** `/api/v1/services/aigc/video-generation/video-synthesis`（X-DashScope-Async: enable）+
+  轮询 `/api/v1/tasks/{id}`；parameters：resolution/ratio/duration/audio/prompt_extend/watermark/seed。
+- **语音识别**：qwen3-asr 走 chat/completions，`input_audio.data` 必须是**完整 Data URI**（无 format 字段）；
+  `asr_options: {language, enable_itn}` 顶层传递，context 需 System Message。
+- **向量**：`/compatible-mode/v1/embeddings`，`dimensions` 放顶层（flash 系列 1024/768/512/256）；
+  text_type/instruct 仅 DashScope 原生接口支持。
+- **语音合成（新增标签页）**：CosyVoice 官方 SDK 走 WebSocket（`wss://…/api-ws/v1/inference`），
+  但存在 **HTTP 非流式接口**：`POST /api/v1/services/audio/tts/SpeechSynthesizer`，
+  body `{model, input:{text, voice, format, sample_rate, instruction?}}` → `output.audio.url`。
+  支持 qwen-audio-3.x-tts / cosyvoice-v2/v3(.5) / qwen3-tts-flash。音色需与模型匹配
+  （qwen3-tts 用英文名 Cherry/Ethan…，cosyvoice 用 longxiaochun_v2 等）。
+- **排序（新增标签页）**：DashScope 原生 `POST /api/v1/services/rerank/text-rerank/text-rerank`，
+  body `{model, input:{query, documents}, parameters:{top_n, return_documents, instruct}}` →
+  `output.results[]` 按 relevance_score 降序（每项 index/relevance_score/document）。
+  另有 OpenAI 兼容扁平版 `/compatible-api/v1/reranks`。qwen3.7-text-rerank / qwen3-rerank 在列，
+  gte-rerank-v2 将于 2026-05-30 弃用。
+
+**Base URL**：经典域名 `dashscope.aliyuncs.com`（compatible-mode/v1 与 /api/v1）仍是文档主推；
+`{WorkspaceId}.{region}.maas.aliyuncs.com` 为可选的生产环境业务空间级域名，仅限对应业务空间的 API Key。
+
+实现：`internal/dashscope/client.go` 新增 `SynthesizeSpeech`/`Rerank`；`/api/infer/tts`、`/api/infer/rerank`
+两个服务端代理路由；Playground 7 标签页 + 各自高级参数；空输入守卫与音色-模型联动。

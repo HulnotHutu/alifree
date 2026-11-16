@@ -28,9 +28,13 @@ export async function fetchKeyStatus(): Promise<{ configured: boolean }> {
   return res.json();
 }
 
-export async function inferChat(
-  req: { model: string; messages: ChatMessage[]; modalities?: string[] },
-): Promise<InferEnvelope> {
+// 对话接口：透传完整 OpenAI 兼容请求体（temperature/top_p/max_tokens/
+// enable_thinking/asr_options 等官方参数直接放在顶层）。
+export async function inferChat(req: {
+  model: string;
+  messages: ChatMessage[];
+  [key: string]: unknown;
+}): Promise<InferEnvelope> {
   const res = await fetch("/api/infer/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -42,11 +46,12 @@ export async function inferChat(
 export async function inferEmbeddings(
   model: string,
   inputs: string[],
+  dimensions?: number,
 ): Promise<InferEnvelope> {
   const res = await fetch("/api/infer/embeddings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, inputs }),
+    body: JSON.stringify({ model, inputs, dimensions }),
   });
   return res.json();
 }
@@ -54,10 +59,38 @@ export async function inferEmbeddings(
 export async function inferImageGen(req: {
   model: string;
   prompt: string;
-  size?: string;
   kind: "image" | "video";
+  params?: Record<string, unknown>; // 官方 parameters 对象
 }): Promise<InferEnvelope> {
   const res = await fetch("/api/infer/imagegen", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+// 非实时语音合成：input 为官方 input 对象（text/voice/format/sample_rate…）。
+export async function inferTTS(req: {
+  model: string;
+  input: Record<string, unknown>;
+}): Promise<InferEnvelope> {
+  const res = await fetch("/api/infer/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+// 排序模型：params 为官方 parameters 对象（top_n/return_documents/instruct）。
+export async function inferRerank(req: {
+  model: string;
+  query: string;
+  documents: string[];
+  params?: Record<string, unknown>;
+}): Promise<InferEnvelope> {
+  const res = await fetch("/api/infer/rerank", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),

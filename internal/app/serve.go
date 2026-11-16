@@ -92,6 +92,8 @@ func (s *server) mux() http.Handler {
 	mux.HandleFunc("POST /api/infer/chat", s.handleInferChat)
 	mux.HandleFunc("POST /api/infer/embeddings", s.handleInferEmbeddings)
 	mux.HandleFunc("POST /api/infer/imagegen", s.handleInferImageGen)
+	mux.HandleFunc("POST /api/infer/tts", s.handleInferTTS)
+	mux.HandleFunc("POST /api/infer/rerank", s.handleInferRerank)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	return mux
 }

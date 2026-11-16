@@ -110,11 +110,57 @@ func (c *Client) ChatCompletion(ctx context.Context, key string, req map[string]
 	return c.do(ctx, http.MethodPost, "/compatible-mode/v1/chat/completions", key, req)
 }
 
-// Embeddings 调用向量化接口。
-func (c *Client) Embeddings(ctx context.Context, key, model string, inputs []string) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodPost, "/compatible-mode/v1/embeddings", key, map[string]any{
-		"model": model, "input": inputs,
-	})
+// Embeddings 调用向量化接口。dimensions 为可选输出维度
+// （qwen3.7-text-embedding-flash 支持 1024/768/512/256，默认 1024）。
+func (c *Client) Embeddings(ctx context.Context, key, model string, inputs []string, dimensions int) (json.RawMessage, error) {
+	body := map[string]any{"model": model, "input": inputs}
+	if dimensions > 0 {
+		body["dimensions"] = dimensions
+	}
+	return c.do(ctx, http.MethodPost, "/compatible-mode/v1/embeddings", key, body)
+}
+
+// SynthesizeSpeech 调用非实时语音合成（HTTP 接口，非流式返回音频 URL）。
+// 端点：/api/v1/services/audio/tts/SpeechSynthesizer；
+// 音频地址在 output.audio.url。input 即官方 input 对象：
+// text/voice/format/sample_rate/instruction/language_hints 等。
+func (c *Client) SynthesizeSpeech(ctx context.Context, key, model string, input map[string]any) (string, error) {
+	raw, err := c.do(ctx, http.MethodPost,
+		"/api/v1/services/audio/tts/SpeechSynthesizer", key, map[string]any{
+			"model": model,
+			"input": input,
+		})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Output struct {
+			Audio struct {
+				URL string `json:"url"`
+			} `json:"audio"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	if out.Output.Audio.URL == "" {
+		return "", fmt.Errorf("响应中没有音频 URL：%s", raw)
+	}
+	return out.Output.Audio.URL, nil
+}
+
+// Rerank 调用排序模型（DashScope 原生接口），返回原始响应：
+// output.results[] 按 relevance_score 降序，每项含 index/relevance_score/document。
+func (c *Client) Rerank(ctx context.Context, key, model, query string, documents []string, parameters map[string]any) (json.RawMessage, error) {
+	if parameters == nil {
+		parameters = map[string]any{}
+	}
+	return c.do(ctx, http.MethodPost,
+		"/api/v1/services/rerank/text-rerank/text-rerank", key, map[string]any{
+			"model":      model,
+			"input":      map[string]any{"query": query, "documents": documents},
+			"parameters": parameters,
+		})
 }
 
 // --- 图像/视频生成：创建异步任务 + 轮询 -------------------------------------
@@ -122,11 +168,10 @@ func (c *Client) Embeddings(ctx context.Context, key, model string, inputs []str
 // GenerateImage 文生图（qwen-image 2.x 系列，同步接口直接返回图片 URL）。
 // 端点：/api/v1/services/aigc/multimodal-generation/generation；
 // 图片地址在 output.choices[0].message.content[].image（PNG，24h 有效）。
-// size 形如 "2048*2048"，留空走服务端默认。
-func (c *Client) GenerateImage(ctx context.Context, key, model, prompt, size string) (string, error) {
-	parameters := map[string]any{}
-	if size != "" {
-		parameters["size"] = size
+// parameters 对应官方 parameters 对象：size/negative_prompt/watermark/prompt_extend/seed。
+func (c *Client) GenerateImage(ctx context.Context, key, model, prompt string, parameters map[string]any) (string, error) {
+	if parameters == nil {
+		parameters = map[string]any{}
 	}
 	raw, err := c.do(ctx, http.MethodPost,
 		"/api/v1/services/aigc/multimodal-generation/generation", key, map[string]any{
@@ -167,10 +212,15 @@ func (c *Client) GenerateImage(ctx context.Context, key, model, prompt, size str
 }
 
 // CreateVideoTask 创建视频生成任务（wan 系列，异步）。
-func (c *Client) CreateVideoTask(ctx context.Context, key, model, prompt string) (string, error) {
+// parameters 对应官方 parameters 对象：resolution/ratio/duration/audio/prompt_extend/watermark/seed。
+func (c *Client) CreateVideoTask(ctx context.Context, key, model, prompt string, parameters map[string]any) (string, error) {
+	if parameters == nil {
+		parameters = map[string]any{}
+	}
 	raw, err := c.do(ctx, http.MethodPost,
 		"/api/v1/services/aigc/video-generation/video-synthesis", key, map[string]any{
 			"model": model, "input": map[string]any{"prompt": prompt},
+			"parameters": parameters,
 		}, map[string]string{"X-DashScope-Async": "enable"})
 	if err != nil {
 		return "", err

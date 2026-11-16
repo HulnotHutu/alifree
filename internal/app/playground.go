@@ -88,8 +88,9 @@ func (s *server) handleInferEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Model  string   `json:"model"`
-		Inputs []string `json:"inputs"`
+		Model      string   `json:"model"`
+		Inputs     []string `json:"inputs"`
+		Dimensions int      `json:"dimensions"` // 可选：1024/768/512/256（flash 系列）
 	}
 	if err := decodeBody(w, r, &req); err != nil {
 		return
@@ -99,7 +100,7 @@ func (s *server) handleInferEmbeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	raw, err := dashscope.New().Embeddings(r.Context(), key, req.Model, req.Inputs)
+	raw, err := dashscope.New().Embeddings(r.Context(), key, req.Model, req.Inputs, req.Dimensions)
 	if err != nil {
 		writeJSON(w, http.StatusOK, inferErr(err))
 		return
@@ -117,10 +118,10 @@ func (s *server) handleInferImageGen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Model  string `json:"model"`
-		Prompt string `json:"prompt"`
-		Size   string `json:"size"`
-		Kind   string `json:"kind"` // image | video
+		Model  string         `json:"model"`
+		Prompt string         `json:"prompt"`
+		Kind   string         `json:"kind"`   // image | video
+		Params map[string]any `json:"params"` // 官方 parameters 对象（size/resolution/ratio/duration/audio/…）
 	}
 	if err := decodeBody(w, r, &req); err != nil {
 		return
@@ -133,7 +134,7 @@ func (s *server) handleInferImageGen(w http.ResponseWriter, r *http.Request) {
 	client := dashscope.New()
 	if req.Kind == "video" {
 		// 视频生成：异步任务，提交后轮询（最长 5 分钟）
-		taskID, err := client.CreateVideoTask(r.Context(), key, req.Model, req.Prompt)
+		taskID, err := client.CreateVideoTask(r.Context(), key, req.Model, req.Prompt, req.Params)
 		if err != nil {
 			writeJSON(w, http.StatusOK, inferErr(err))
 			return
@@ -174,13 +175,78 @@ func (s *server) handleInferImageGen(w http.ResponseWriter, r *http.Request) {
 
 	// 图像生成（qwen-image 2.x）：同步接口，直接返回图片 URL
 	start := time.Now()
-	imageURL, err := client.GenerateImage(r.Context(), key, req.Model, req.Prompt, req.Size)
+	imageURL, err := client.GenerateImage(r.Context(), key, req.Model, req.Prompt, req.Params)
 	if err != nil {
 		writeJSON(w, http.StatusOK, inferErr(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, inferEnvelope{OK: true,
 		Data:      mustJSON(map[string]any{"urls": []string{imageURL}}),
+		LatencyMs: time.Since(start).Milliseconds()})
+}
+
+// handleInferTTS 代理非实时语音合成接口（qwen-audio-3.x-tts / cosyvoice / qwen3-tts-flash）。
+func (s *server) handleInferTTS(w http.ResponseWriter, r *http.Request) {
+	key := dashScopeKey(s.envFile)
+	if key == "" {
+		writeJSON(w, http.StatusOK, inferEnvelope{OK: false,
+			Error: "未配置 DASHSCOPE_API_KEY。请在 " + s.envFile + " 写入 DASHSCOPE_API_KEY=sk-…"})
+		return
+	}
+	var req struct {
+		Model string         `json:"model"`
+		Input map[string]any `json:"input"` // text/voice/format/sample_rate/instruction
+	}
+	if err := decodeBody(w, r, &req); err != nil {
+		return
+	}
+	if req.Model == "" {
+		writeJSON(w, http.StatusOK, inferEnvelope{OK: false, Error: "缺少 model"})
+		return
+	}
+	if text, _ := req.Input["text"].(string); strings.TrimSpace(text) == "" {
+		writeJSON(w, http.StatusOK, inferEnvelope{OK: false, Error: "缺少 input.text（待合成文本）"})
+		return
+	}
+	start := time.Now()
+	audioURL, err := dashscope.New().SynthesizeSpeech(r.Context(), key, req.Model, req.Input)
+	if err != nil {
+		writeJSON(w, http.StatusOK, inferErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, inferEnvelope{OK: true,
+		Data:      mustJSON(map[string]any{"urls": []string{audioURL}}),
+		LatencyMs: time.Since(start).Milliseconds()})
+}
+
+// handleInferRerank 代理排序模型接口（qwen3-rerank / gte-rerank 等）。
+func (s *server) handleInferRerank(w http.ResponseWriter, r *http.Request) {
+	key := dashScopeKey(s.envFile)
+	if key == "" {
+		writeJSON(w, http.StatusOK, inferEnvelope{OK: false,
+			Error: "未配置 DASHSCOPE_API_KEY。请在 " + s.envFile + " 写入 DASHSCOPE_API_KEY=sk-…"})
+		return
+	}
+	var req struct {
+		Model     string         `json:"model"`
+		Query     string         `json:"query"`
+		Documents []string       `json:"documents"`
+		Params    map[string]any `json:"params"` // top_n/return_documents/instruct
+	}
+	if err := decodeBody(w, r, &req); err != nil {
+		return
+	}
+	if req.Model == "" || strings.TrimSpace(req.Query) == "" || len(req.Documents) == 0 {
+		writeJSON(w, http.StatusOK, inferEnvelope{OK: false, Error: "缺少 model、query 或 documents"})
+		return
+	}
+	start := time.Now()
+	raw, err := dashscope.New().Rerank(r.Context(), key, req.Model, req.Query, req.Documents, req.Params)
+	if err != nil {
+		writeJSON(w, http.StatusOK, inferErr(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, inferEnvelope{OK: true, Data: raw,
 		LatencyMs: time.Since(start).Milliseconds()})
 }
 
