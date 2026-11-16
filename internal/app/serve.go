@@ -84,11 +84,23 @@ type server struct {
 func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handlePage)
+	mux.HandleFunc("GET /playground", s.handlePlayground)
 	mux.HandleFunc("GET /static/echarts.min.js", s.handleEcharts)
 	mux.HandleFunc("GET /api/quota", s.handleQuota)
 	mux.HandleFunc("GET /api/history", s.handleHistory)
+	mux.HandleFunc("GET /api/key-status", s.handleKeyStatus)
+	mux.HandleFunc("POST /api/infer/chat", s.handleInferChat)
+	mux.HandleFunc("POST /api/infer/embeddings", s.handleInferEmbeddings)
+	mux.HandleFunc("POST /api/infer/imagegen", s.handleInferImageGen)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	return mux
+}
+
+// handlePlayground 返回模型测试台页面。
+func (s *server) handlePlayground(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(playgroundHTML())
 }
 
 func (s *server) handleEcharts(w http.ResponseWriter, r *http.Request) {

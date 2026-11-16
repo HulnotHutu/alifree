@@ -6,6 +6,7 @@ docker 式的 cli/daemon 结构：`aihelpme` 是薄客户端，`aihelpmed` 是�
 aihelpme "Go 里怎么原子地交换两个 int？"   # put：提问后阻塞至多 5s，短问题当场得到回答
 cat big_doc.txt | aihelpme "总结这份文档"  # 管道内容拼在问题后
 aihelpme                                   # get：无输入即取最新回答，未就绪提示稍等
+aihelpme --help                            # 用法说明
 ```
 
 - `aihelpme`（cli）：**有输入即提问**（位置参数或管道 stdin），经 unix socket 发给 daemon 后**阻塞至多 5s**——短问题当场打印回答（stdout 纯净，可继续管道），超时则提示"仍在处理中"，答案稍后用裸命令取回；**无输入即取回答**。daemon 未运行时 cli 会自动拉起一个。
@@ -32,6 +33,7 @@ daemon 只监听 unix socket，以下接口仅 curl 可用（cli 不封装）：
 
 ```bash
 curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/list   # 队列状态（排队 id/working/ready）
+curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/info   # 当前生效配置总览（含运行时已切换的 model/prompt）
 curl --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock http://localhost/model  # 当前模型 + 可用 Text 模型
 curl -X PUT --unix-socket $XDG_RUNTIME_DIR/aihelpme.sock \
      -d '{"model":"qwen3.8-max"}' http://localhost/model                  # 切换模型，即时生效于后续任务

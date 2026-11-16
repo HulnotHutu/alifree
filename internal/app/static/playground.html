@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>百炼模型测试台</title>
+<style>
+  :root {
+    --bg: #F5F6F8; --surface: #FFFFFF; --ink: #1A2230; --muted: #5F6B7A;
+    --faint: #98A2B3; --line: #E3E7ED; --line-soft: #EEF1F5;
+    --accent: #E05200; --accent-ink: #B54100; --accent-tint: #FDEDE2;
+    --ok: #0E9F6E; --warn: #DD8E00; --bad: #E5484D; --bad-tint: #FDECEC;
+    --ok-tint: #E7F6EF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, "Segoe UI", "Noto Sans SC", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+  }
+  .mono, .lat {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Consolas,
+                 "Noto Sans Mono", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px 40px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 14px; flex-wrap: wrap; padding: 18px 0 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .mark { width: 11px; height: 11px; border-radius: 2px; background: var(--accent); }
+  h1 { margin: 0; font-size: 19px; font-weight: 650; }
+  .hdr-right { display: flex; align-items: center; gap: 12px; }
+  .keyBadge {
+    font-size: 13px; border-radius: 6px; padding: 4px 10px;
+    background: var(--bad-tint); color: #A03030; border: 1px solid #F5C2C2;
+  }
+  .keyBadge.ok { background: var(--ok-tint); color: #0B7A55; border-color: #BFE8D2; }
+  .backLink { font-size: 13px; color: var(--accent-ink); text-decoration: none;
+              border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+  .backLink:hover { border-color: var(--accent); }
+
+  .banner {
+    margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 13.5px;
+  }
+  .banner.warn { background: #FFF7E0; border: 1px solid #F0DFA8; color: #7A5B00; }
+  .banner code {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+    background: rgba(0,0,0,.05); border-radius: 4px; padding: 1px 5px;
+  }
+
+  nav.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 16px 0 0; }
+  nav.tabs button {
+    border: 1px solid var(--line); background: var(--surface); border-radius: 8px 8px 0 0;
+    padding: 9px 18px; font: inherit; font-size: 14.5px; color: var(--muted); cursor: pointer;
+    border-bottom: 0;
+  }
+  nav.tabs button:hover { color: var(--ink); }
+  nav.tabs button[aria-selected="true"] {
+    color: var(--accent-ink); font-weight: 600;
+    border-color: var(--line) var(--line) var(--bg);
+    background: var(--bg); position: relative; top: 1px;
+  }
+  .tabdesc { font-size: 13px; color: var(--faint); margin: 10px 2px 0; }
+
+  .panel {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    border-top: 1px solid var(--line); padding-top: 14px;
+  }
+  .panel[hidden] { display: none; }
+  @media (max-width: 860px) { .panel { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px; padding: 14px 16px; min-width: 0;
+  }
+  .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 550; color: var(--muted); }
+  label.fld { display: block; font-size: 12.5px; color: var(--muted); margin: 10px 0 4px; }
+  textarea, select, input[type=text] {
+    width: 100%; font: inherit; font-size: 14px; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px;
+  }
+  textarea { resize: vertical; min-height: 96px; }
+  textarea:focus, select:focus, input:focus {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  .run {
+    margin-top: 14px; width: 100%; padding: 9px 0; border: 0; border-radius: 6px;
+    background: var(--accent); color: #fff; font: inherit; font-size: 14.5px;
+    font-weight: 550; cursor: pointer;
+  }
+  .run:hover:enabled { background: #C94A00; }
+  .run:disabled { opacity: .55; cursor: default; }
+  .run .spin {
+    display: none; width: 13px; height: 13px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.45); border-top-color: #fff;
+    vertical-align: -2px; margin-right: 8px;
+  }
+  .run.loading .spin { display: inline-block; animation: turn .8s linear infinite; }
+  @keyframes turn { to { transform: rotate(360deg); } }
+  .hint { font-size: 12.5px; color: var(--faint); margin-top: 8px; line-height: 1.7; }
+
+  .out { min-height: 300px; white-space: pre-wrap; font-size: 14px; overflow-wrap: anywhere; }
+  .out img, .out video { max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+  .out .vec { font-size: 12.5px; color: var(--muted); }
+  .sim {
+    font-size: 30px; font-weight: 650; margin: 6px 0 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft);
+          font-size: 12.5px; color: var(--faint); display: flex; gap: 18px; flex-wrap: wrap; }
+  .err {
+    background: var(--bad-tint); border: 1px solid #F5C2C2; color: #A03030;
+    border-radius: 6px; padding: 10px 14px; font-size: 13.5px;
+  }
+  .muted { color: var(--faint); }
+  audio { width: 100%; }
+
+  footer { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--line);
+           font-size: 12.5px; color: var(--faint); line-height: 1.8; }
+  footer code { font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; }
+  @media (prefers-reduced-motion: reduce) {
+    .run.loading .spin { animation: none; border-top-color: rgba(255,255,255,.9); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <h1>百炼模型测试台</h1>
+    </div>
+    <div class="hdr-right">
+      <span class="keyBadge" id="keyBadge">检查 Key…</span>
+      <a class="backLink" href="/">← 返回额度看板</a>
+    </div>
+  </header>
+
+  <div id="keyBanner" class="banner warn" hidden>
+    尚未配置模型调用 Key。请在 <code>~/.config/bailian-quota.env</code> 追加一行
+    <code>DASHSCOPE_API_KEY=sk-…</code>（百炼控制台「API-KEY」页面创建），保存后本页即可直接使用，无需重启服务。
+  </div>
+
+  <nav class="tabs" role="tablist" id="tabs">
+    <button role="tab" aria-selected="true" data-tab="text">文本 · 对话</button>
+    <button role="tab" aria-selected="false" data-tab="vision">视觉 · 文生图</button>
+    <button role="tab" aria-selected="false" data-tab="multimodal">全模态 · 图+文理解</button>
+    <button role="tab" aria-selected="false" data-tab="audio">语音 · 识别</button>
+    <button role="tab" aria-selected="false" data-tab="embedding">向量 · 相似度</button>
+  </nav>
+  <p class="tabdesc" id="tabdesc"></p>
+
+  <!-- 文本 -->
+  <section class="panel" data-panel="text" hidden>
+    <div class="card">
+      <h2>输入</h2>
+      <label class="fld" for="text-model">模型</label>
+      <select id="text-model"></select>
+      <label class="fld" for="text-prompt">提示词</label>
+      <textarea id="text-prompt" placeholder="例如：用一句话解释什么是免费额度用完即停">用一句话解释什么是"免费额度用完即停"。</textarea>
+      <button class="run" data-run="text"><span class="spin"></span>发送</button>
+      <p class="hint">调用 OpenAI 兼容对话接口，消耗文本 token 额度。</p>
+    </div>
+    <div class="card">
+      <h2>输出</h2>
+      <div class="out" id="text-out" aria-live="polite"><span class="muted">等待请求…</span></div>
+      <div class="meta" id="text-meta" hidden></div>
+    </div>
+  </section>
+
+  <!-- 视觉 -->
+  <section class="panel" data-panel="vision" hidden>
+    <div class="card">
+      <h2>输入</h2>
+      <label class="fld" for="vision-model">模型（图像生成 / 视频生成）</label>
+      <select id="vision-model"></select>
+      <label class="fld" for="vision-prompt">画面描述</label>
+      <textarea id="vision-prompt" placeholder="例如：一只戴着宇航员头盔的橘猫，漂浮在星云中，赛博朋克风格">一只戴着宇航员头盔的橘猫，漂浮在星云中，赛博朋克风格</textarea>
+      <label class="fld" for="vision-size">尺寸</label>
+      <select id="vision-size">
+        <option value="1024*1024">1024×1024（方图）</option>
+        <option value="720*1280">720×1280（竖图）</option>
+        <option value="1280*720">1280×720（横图）</option>
+      </select>
+      <button class="run" data-run="vision"><span class="spin"></span>生成</button>
+      <p class="hint">异步任务：提交后自动轮询，图片约 10–30 秒，视频可能需要 1–4 分钟。产出的 URL 有效期有限，及时保存。</p>
+    </div>
+    <div class="card">
+      <h2>输出</h2>
+      <div class="out" id="vision-out" aria-live="polite"><span class="muted">等待请求…</span></div>
+      <div class="meta" id="vision-meta" hidden></div>
+    </div>
+  </section>
+
+  <!-- 全模态 -->
+  <section class="panel" data-panel="multimodal" hidden>
+    <div class="card">
+      <h2>输入</h2>
+      <label class="fld" for="mm-model">模型</label>
+      <select id="multimodal-model"></select>
+      <label class="fld" for="mm-image">图片（可选，png/jpg ≤ 10MB）</label>
+      <input type="file" id="mm-image" accept="image/png,image/jpeg,image/webp">
+      <label class="fld" for="mm-prompt">提问</label>
+      <textarea id="mm-prompt" placeholder="例如：描述这张图片里的内容">请用两句话描述这张图片。</textarea>
+      <button class="run" data-run="multimodal"><span class="spin"></span>发送</button>
+      <p class="hint">图片以 base64 随请求上传，模型图文混合理解后输出文本。</p>
+    </div>
+    <div class="card">
+      <h2>输出</h2>
+      <div class="out" id="mm-out" aria-live="polite"><span class="muted">等待请求…</span></div>
+      <div class="meta" id="mm-meta" hidden></div>
+    </div>
+  </section>
+
+  <!-- 语音 -->
+  <section class="panel" data-panel="audio" hidden>
+    <div class="card">
+      <h2>输入</h2>
+      <label class="fld" for="audio-model">模型（语音识别）</label>
+      <select id="audio-model"></select>
+      <label class="fld" for="audio-file">音频文件（wav/mp3，≤ 10MB）</label>
+      <input type="file" id="audio-file" accept="audio/wav,audio/mpeg,audio/x-wav">
+      <label class="fld" for="audio-prompt">附加指令（可选）</label>
+      <textarea id="audio-prompt" style="min-height:64px" placeholder="例如：请把这段语音转写成文字">请把这段语音转写成文字。</textarea>
+      <button class="run" data-run="audio"><span class="spin"></span>识别</button>
+      <p class="hint">音频以 base64 随对话请求上传，输出转写文本。识别结果以模型实际听到的内容为准。</p>
+    </div>
+    <div class="card">
+      <h2>输出</h2>
+      <div class="out" id="audio-out" aria-live="polite"><span class="muted">等待请求…</span></div>
+      <div class="meta" id="audio-meta" hidden></div>
+    </div>
+  </section>
+
+  <!-- 向量 -->
+  <section class="panel" data-panel="embedding" hidden>
+    <div class="card">
+      <h2>输入</h2>
+      <label class="fld" for="emb-model">模型</label>
+      <select id="embedding-model"></select>
+      <label class="fld" for="emb-a">文本 A</label>
+      <textarea id="emb-a" placeholder="第一段文本">阿里巴巴的百炼平台提供大模型服务。</textarea>
+      <label class="fld" for="emb-b">文本 B</label>
+      <textarea id="emb-b" style="min-height:64px" placeholder="第二段文本">阿里云上可以调用通义千问系列的模型。</textarea>
+      <button class="run" data-run="embedding"><span class="spin"></span>计算向量与相似度</button>
+      <p class="hint">输出每个文本的向量（展示维度与前几维），并计算 A、B 的余弦相似度。</p>
+    </div>
+    <div class="card">
+      <h2>输出</h2>
+      <div class="out" id="emb-out" aria-live="polite"><span class="muted">等待请求…</span></div>
+      <div class="meta" id="emb-meta" hidden></div>
+    </div>
+  </section>
+
+  <footer>
+    <div>推理走服务端代理 <code>/api/infer/*</code>，API Key 只在服务端使用；消耗对应模型的免费额度，超额时收到 403 <code>AllocationQuota.FreeTierOnly.</code>（用完即停）。</div>
+    <div>状态查询：<code>GET /api/key-status</code>；各类型接口：<code>POST /api/infer/chat · embeddings · imagegen</code></div>
+  </footer>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const fmtNum = v => {
+    v = Math.round(Number(v) || 0);
+    if (v >= 1e6 && v % 1e5 === 0) return (v / 1e6) + "M";
+    if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+    return String(v);
+  };
+
+  // 每个测试台 Tab 支持的模型（白名单：该链路实测可用的调用形态）
+  const TABS = {
+    text:       { desc: "纯文本对话：文本进 → 文本出。", types: ["Text"],
+                  pick: m => m.type === "Text" },
+    vision:     { desc: "图像/视频生成：文本进 → 图片或视频出（异步任务）。", types: ["Vision"],
+                  pick: m => ["qwen-image-2.1-turbo","qwen-image-2.1-pro","wan3.0-video-prime"].includes(m.model) },
+    multimodal: { desc: "图文混合理解：图片（可选）+ 提问 → 文本出。", types: ["Multimodal"],
+                  pick: m => m.model === "qwen3.8-omni-flash" },
+    audio:      { desc: "语音识别：音频进 → 文本出。", types: ["Audio"],
+                  pick: m => ["qwen-audio-3.1-asr-flash","qwen-audio-3.1-asr-flash-message"].includes(m.model) },
+    embedding:  { desc: "向量化：文本进 → 向量出，可比较两段文本的余弦相似度。", types: ["Embedding"],
+                  pick: m => m.model.includes("text-embedding") },
+  };
+  // 快照缺失时的兜底默认模型
+  const FALLBACK = {
+    text: ["qwen3.8-flash"], vision: ["qwen-image-2.1-turbo", "wan3.0-video-prime"],
+    multimodal: ["qwen3.8-omni-flash"], audio: ["qwen-audio-3.1-asr-flash"],
+    embedding: ["qwen3.7-text-embedding-flash"],
+  };
+  const VIDEO_MODELS = new Set(["wan3.0-video-prime"]);
+
+  const state = { models: null, tab: "text", fileData: null };
+
+  function setOut(id, html) { $("#" + id + "-out").innerHTML = html; }
+  function setErr(tab, msg) {
+    setOut(tab, `<div class="err">${esc(msg)}</div>`);
+  }
+  function setMeta(id, latency, tokens) {
+    const el = $("#" + id + "-meta");
+    if (latency == null && tokens == null) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML =
+      (latency != null ? `<span class="lat">耗时 ${latency} ms</span>` : "") +
+      (tokens != null ? `<span class="lat">tokens ${tokens}</span>` : "");
+  }
+  function running(tab, on) {
+    const btn = document.querySelector(`.run[data-run="${tab}"]`);
+    btn.disabled = on;
+    btn.classList.toggle("loading", on);
+  }
+
+  // --- 模型下拉 ---
+  function fillModelSelects() {
+    for (const tab of Object.keys(TABS)) {
+      const sel = $("#" + tab + "-model");
+      if (!sel) return;
+      const list = state.models
+        ? state.models.filter(TABS[tab].pick)
+        : (FALLBACK[tab] || []).map(name => ({ model: name }));
+      if (!list.length) {
+        sel.innerHTML = `<option value="">（${state.models ? "该类型暂无模型" : "快照未加载"}）</option>`;
+        sel.disabled = true;
+        continue;
+      }
+      sel.disabled = false;
+      sel.innerHTML = list.map(m => {
+        const extra = state.models && m.remaining != null
+          ? ` · 剩 ${fmtNum(m.remaining)}` : "";
+        return `<option value="${esc(m.model)}">${esc(m.model)}${extra}</option>`;
+      }).join("");
+    }
+  }
+
+  function loadModels() {
+    fetch("/api/quota").then(r => r.json()).then(out => {
+      if (out.ok && out.data && Array.isArray(out.data.models)) {
+        state.models = out.data.models;
+      }
+      fillModelSelects();
+    }).catch(() => fillModelSelects());
+  }
+
+  function checkKey() {
+    fetch("/api/key-status").then(r => r.json()).then(out => {
+      const badge = $("#keyBadge"), banner = $("#keyBanner");
+      if (out.configured) {
+        badge.textContent = "API Key 已配置";
+        badge.classList.add("ok");
+        banner.hidden = true;
+      } else {
+        badge.textContent = "API Key 未配置";
+        banner.hidden = false;
+      }
+    }).catch(() => {});
+  }
+
+  // --- Tab 切换 ---
+  function showTab(name) {
+    state.tab = name;
+    document.querySelectorAll("nav.tabs button").forEach(b =>
+      b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+    document.querySelectorAll("[data-panel]").forEach(p =>
+      p.hidden = p.dataset.panel !== name);
+    $("#tabdesc").textContent = TABS[name].desc;
+  }
+  $("#tabs").addEventListener("click", e => {
+    const b = e.target.closest("[data-tab]");
+    if (b) showTab(b.dataset.tab);
+  });
+
+  // --- 各类型请求构造 ---
+  async function fileToBase64(file) {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result));
+      fr.onerror = () => rej(new Error("读取文件失败"));
+      fr.readAsDataURL(file);
+    });
+  }
+
+  const runners = {
+    async text() {
+      const model = $("#text-model").value;
+      const prompt = $("#text-prompt").value.trim();
+      if (!model) return setErr("text", "没有可选模型。");
+      if (!prompt) return setErr("text", "请输入提示词。");
+      running("text", true); setOut("text", '<span class="muted">请求中…</span>'); setMeta("text");
+      const t0 = performance.now();
+      try {
+        const res = await fetch("/api/infer/chat", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] }) });
+        const out = await res.json();
+        if (!out.ok) return setErr("text", out.error);
+        const msg = (out.data.choices?.[0]?.message?.content) || "(空响应)";
+        setOut("text", esc(msg));
+        setMeta("text", out.latencyMs, out.data.usage?.total_tokens);
+      } catch (err) {
+        setErr("text", "请求失败：" + err.message);
+      } finally {
+        running("text", false);
+      }
+    },
+
+    async vision() {
+      const model = $("#vision-model").value;
+      const prompt = $("#vision-prompt").value.trim();
+      const size = $("#vision-size").value;
+      if (!model) return setErr("vision", "没有可选模型。");
+      if (!prompt) return setErr("vision", "请输入画面描述。");
+      const kind = VIDEO_MODELS.has(model) ? "video" : "image";
+      running("vision", true);
+      setOut("vision", kind === "video"
+        ? '<span class="muted">视频生成中（可能需要 1–4 分钟）…</span>'
+        : '<span class="muted">图片生成中（约 10–30 秒）…</span>');
+      setMeta("vision");
+      try {
+        const res = await fetch("/api/infer/imagegen", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, prompt, size, kind }) });
+        const out = await res.json();
+        if (!out.ok) return setErr("vision", out.error);
+        const urls = out.data.urls || [];
+        if (kind === "video") {
+          setOut("vision", urls.map(u =>
+            `<video src="${esc(u)}" controls></video>`).join("") || "(无产物)");
+        } else {
+          setOut("vision", urls.map(u =>
+            `<img src="${esc(u)}" alt="生成结果">`).join("") || "(无产物)");
+        }
+        setMeta("vision", out.latencyMs);
+      } catch (err) {
+        setErr("vision", "请求失败：" + err.message);
+      } finally {
+        running("vision", false);
+      }
+    },
+
+    async multimodal() {
+      const model = $("#multimodal-model").value;
+      const prompt = $("#mm-prompt").value.trim();
+      if (!model) return setErr("multimodal", "没有可选模型。");
+      if (!prompt) return setErr("multimodal", "请输入提问。");
+      const file = $("#mm-image").files[0];
+      let content = [{ type: "text", text: prompt }];
+      if (file) {
+        if (file.size > 10 * 1024 * 1024) return setErr("multimodal", "图片超过 10MB。");
+        const dataUrl = await fileToBase64(file);
+        content.unshift({ type: "image_url", image_url: { url: dataUrl } });
+      }
+      running("multimodal", true);
+      setOut("multimodal", '<span class="muted">请求中…</span>'); setMeta("mm");
+      try {
+        const res = await fetch("/api/infer/chat", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, messages: [{ role: "user", content }],
+                                 modalities: ["text"] }) });
+        const out = await res.json();
+        if (!out.ok) return setErr("multimodal", out.error);
+        const msg = (out.data.choices?.[0]?.message?.content) || "(空响应)";
+        setOut("multimodal", esc(msg));
+        setMeta("mm", out.latencyMs, out.data.usage?.total_tokens);
+      } catch (err) {
+        setErr("multimodal", "请求失败：" + err.message);
+      } finally {
+        running("multimodal", false);
+      }
+    },
+
+    async audio() {
+      const model = $("#audio-model").value;
+      const prompt = $("#audio-prompt").value.trim() || "请转写这段音频。";
+      const file = $("#audio-file").files[0];
+      if (!model) return setErr("audio", "没有可选模型。");
+      if (!file) return setErr("audio", "请选择音频文件（wav/mp3）。");
+      if (file.size > 10 * 1024 * 1024) return setErr("audio", "音频超过 10MB。");
+      const dataUrl = await fileToBase64(file);
+      const base64 = dataUrl.split(",")[1] || "";
+      const format = file.name.toLowerCase().endsWith(".mp3") ? "mp3" : "wav";
+      running("audio", true);
+      setOut("audio", '<span class="muted">识别中…</span>'); setMeta("audio");
+      try {
+        const res = await fetch("/api/infer/chat", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, messages: [{ role: "user", content: [
+            { type: "input_audio", input_audio: { data: base64, format } },
+            { type: "text", text: prompt },
+          ] }] }) });
+        const out = await res.json();
+        if (!out.ok) return setErr("audio", out.error);
+        const msg = (out.data.choices?.[0]?.message?.content) || "(空响应)";
+        setOut("audio", esc(msg));
+        setMeta("audio", out.latencyMs, out.data.usage?.total_tokens);
+      } catch (err) {
+        setErr("audio", "请求失败：" + err.message);
+      } finally {
+        running("audio", false);
+      }
+    },
+
+    async embedding() {
+      const model = $("#embedding-model").value;
+      const a = $("#emb-a").value.trim();
+      const b = $("#emb-b").value.trim();
+      if (!model) return setErr("embedding", "没有可选模型。");
+      if (!a || !b) return setErr("embedding", "请输入两段文本。");
+      running("embedding", true);
+      setOut("embedding", '<span class="muted">计算中…</span>'); setMeta("emb");
+      try {
+        const res = await fetch("/api/infer/embeddings", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, inputs: [a, b] }) });
+        const out = await res.json();
+        if (!out.ok) return setErr("embedding", out.error);
+        const vecs = (out.data.data || []).map(e => e.embedding);
+        if (vecs.length < 2) return setErr("embedding", "响应缺少向量数据。");
+        const dot = vecs[0].reduce((s, v, i) => s + v * vecs[1][i], 0);
+        const norm = v => Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+        const sim = dot / (norm(vecs[0]) * norm(vecs[1]));
+        const dim = vecs[0].length;
+        $("#emb-out").innerHTML =
+          `<div class="sim">${sim.toFixed(4)}</div>
+           <div class="muted">余弦相似度（-1 ~ 1，越接近 1 越相似）</div>
+           <div class="vec">维度：${dim}
+A 前 8 维：[${vecs[0].slice(0, 8).map(x => x.toFixed(4)).join(", ")}…]
+B 前 8 维：[${vecs[1].slice(0, 8).map(x => x.toFixed(4)).join(", ")}…]</div>`;
+        setMeta("emb", out.latencyMs, out.data.usage?.total_tokens);
+      } catch (err) {
+        setErr("embedding", "请求失败：" + err.message);
+      } finally {
+        running("embedding", false);
+      }
+    },
+  };
+
+  document.querySelectorAll(".run").forEach(btn =>
+    btn.addEventListener("click", () => runners[btn.dataset.run]()));
+
+  // --- 启动 ---
+  showTab("text");
+  checkKey();
+  loadModels();
+})();
+</script>
+</body>
+</html>

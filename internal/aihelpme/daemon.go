@@ -264,6 +264,7 @@ func (d *Daemon) Serve(ln net.Listener) error {
 	mux.HandleFunc("PUT /model", d.handlePutModel)
 	mux.HandleFunc("GET /prompt", d.handleGetPrompt)
 	mux.HandleFunc("PUT /prompt", d.handlePutPrompt)
+	mux.HandleFunc("GET /info", d.handleInfo)
 	return (&http.Server{Handler: d.logRequests(mux)}).Serve(ln)
 }
 
@@ -508,6 +509,28 @@ func (d *Daemon) handlePutPrompt(w http.ResponseWriter, r *http.Request) {
 	d.setPrompt(*req.Prompt)
 	slog.Info("prompt updated", "prompt_chars", utf8.RuneCountInString(*req.Prompt))
 	writeJSON(w, http.StatusOK, map[string]string{"prompt": d.currentPrompt()})
+}
+
+// handleInfo backs GET /info: the daemon's current effective configuration,
+// grouped in two levels — "model" is everything about calling the model
+// (reflecting runtime switches from PUT /model and PUT /prompt), "system"
+// is the daemon process and its runtime environment. curl-only, like /list.
+func (d *Daemon) handleInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model": map[string]any{
+			"current":       d.currentModel(),
+			"system_prompt": d.currentPrompt(),
+			"call_timeout":  d.cfg.CallTimeout.String(),
+			"quota_db":      d.cfg.QuotaDB,
+		},
+		"system": map[string]any{
+			"workspace_id": d.cfg.WorkspaceID,
+			"stream":       d.cfg.Stream,
+			"socket":       SocketPath(),
+			"config_file":  ConfigPath(),
+			"pid":          os.Getpid(),
+		},
+	})
 }
 
 // Status snapshots the queue: the ids waiting in submission order, whether

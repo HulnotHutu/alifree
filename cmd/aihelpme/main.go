@@ -16,12 +16,27 @@ import (
 )
 
 func main() {
+	// --help/-h 优先于「有输入即提问」规则
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
 	// 有输入（位置参数或管道 stdin）即向 ai 提问；无输入即取最新回答。
 	if len(os.Args) > 1 || hasPipedStdin() {
 		exit(runPut(os.Args[1:]))
 		return
 	}
 	exit(runGet())
+}
+
+// usage 打印用法说明（--help/-h 触发）。
+func usage() {
+	fmt.Fprint(os.Stdout, `用法：
+  aihelpme "问题"              向 ai 提问（stream 模式逐字输出；阻塞模式短问题等待至多 5s）
+  cat 文档 | aihelpme "总结"   管道内容拼在问题后
+  aihelpme                     取最新一次的回答（未就绪会提示稍等）
+  aihelpme --help              本说明
+`)
 }
 
 // hasPipedStdin reports whether stdin is a pipe or file rather than a

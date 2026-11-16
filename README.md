@@ -56,6 +56,7 @@ docker 式的 cli/daemon 结构：`aihelpme` 是薄客户端，`aihelpmed` 是�
 aihelpme "Go 里怎么原子地交换两个 int？"   # put：提问后阻塞至多 5s，短问题当场得到回答
 cat big_doc.txt | aihelpme "总结这份文档"  # 管道内容拼在问题后
 aihelpme                                   # get：无输入即取最新回答，未就绪提示稍等
+aihelpme --help                            # 用法说明
 ```
 
 **详细文档见 [docs/aihelpme.md](docs/aihelpme.md)**：config.yaml 配置、调试接口（`/list`、`/model`、`/prompt`）、流式模式、slog 日志、systemd 用户服务部署。
@@ -140,6 +141,7 @@ JSON 输出结构（`--json`，与旧版 Python 工具的归档格式完全一�
 - 首次打开库时，会把旧版 JSON 归档（`~/.local/share/bailian-quota/free-quota-*.json`）一次性迁入，旧文件保留不动；
 - 页面右上角的「刷新」按钮抓取一次并写入库，需要凭证（见下节）；
 - **可视化面板**（ECharts 5.6，已 vendor 进二进制、离线可用）：各类型剩余额度、到期时间分布、剩余比例分布、快照历史趋势（随 cron 每日抓取自然生长）；前三张图跟随当前筛选视图，标题处显示可视化范围；
+- **模型测试台**（`/playground`）：五大模型类型各自的输入/输出形态——文本对话、文生图/视频生成（异步轮询）、图+文理解、语音识别、向量相似度；走服务端代理 `/api/infer/*`，`DASHSCOPE_API_KEY`（sk-）只在服务端使用，凭证文件加一行即用；
 - 列表支持搜索、类型筛选、点表头排序与分页（每页 20/50/100 可选），筛选或排序变化自动回到第一页；
 - 服务只绑定 `127.0.0.1`，凭证只在服务端进程内使用，不会发送到浏览器；
 - HTTP API：`GET /api/quota`（最新快照 JSON）、`GET /api/history`（抓取历史）、`POST /api/refresh`（抓取并入库）；

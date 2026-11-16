@@ -17,6 +17,15 @@ func dashboardHTML() []byte {
 	return data
 }
 
+// playgroundHTML 返回模型测试台页面。
+func playgroundHTML() []byte {
+	data, err := fs.ReadFile(staticFiles, "static/playground.html")
+	if err != nil {
+		return []byte("测试台页面缺失：" + err.Error())
+	}
+	return data
+}
+
 // echartsJS 返回内嵌的 ECharts 库（vendor 进二进制，离线可用）。
 func echartsJS() []byte {
 	data, err := fs.ReadFile(staticFiles, "static/echarts.min.js")
