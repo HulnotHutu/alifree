@@ -44,8 +44,29 @@ const FALLBACK: Record<TabKey, string[]> = {
   embedding: ["qwen3.7-text-embedding-flash"],
 };
 
-function modelLabel(m: ModelQuota): string {
-  return m.remaining != null ? `${m.model} · 剩 ${fmtNum(m.remaining)}` : m.model;
+// 模型名与剩余额度分列显示：名称居左、额度居右
+function modelOption(m: ModelQuota) {
+  return {
+    value: m.model,
+    label: (
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          minWidth: 0,
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {m.model}
+        </span>
+        <span style={{ flexShrink: 0, color: "#98A2B3", fontSize: 12.5 }}>
+          {m.remaining != null ? `剩 ${fmtNum(m.remaining)}` : ""}
+        </span>
+      </div>
+    ),
+  };
 }
 
 export default function Playground() {
@@ -181,7 +202,7 @@ function TextTab({ models, Err, Latency }: {
       <Card title="输入">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
-                options={models.map((m) => ({ value: m.model, label: modelLabel(m) }))} />
+                options={models.map(modelOption)} />
         <TextField label="提示词" value={prompt} onChange={setPrompt} />
         <Button type="primary" icon={<SendOutlined />} loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           发送
@@ -223,7 +244,7 @@ function VisionTab({ models, Err, Latency }: {
       <Card title="输入">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型（图像生成 / 视频生成）</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
-                options={models.map((m) => ({ value: m.model, label: modelLabel(m) }))} />
+                options={models.map(modelOption)} />
         <TextField label="画面描述" value={prompt} onChange={setPrompt} />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>尺寸</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={size} onChange={setSize}
@@ -284,7 +305,7 @@ function MultimodalTab({ models, Err, Latency }: {
       <Card title="输入">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
-                options={models.map((m) => ({ value: m.model, label: modelLabel(m) }))} />
+                options={models.map(modelOption)} />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4, marginTop: 10 }}>图片（可选，png/jpg ≤ 10MB）</Typography.Paragraph>
         <Upload.Dragger
           maxCount={1}
@@ -352,7 +373,7 @@ function AudioTab({ models, Err, Latency }: {
       <Card title="输入">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型（语音识别）</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
-                options={models.map((m) => ({ value: m.model, label: modelLabel(m) }))} />
+                options={models.map(modelOption)} />
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4, marginTop: 10 }}>音频文件（wav/mp3 ≤ 10MB）</Typography.Paragraph>
         <Upload.Dragger
           maxCount={1}
@@ -405,7 +426,7 @@ function EmbeddingTab({ models, Err, Latency }: {
       <Card title="输入">
         <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>模型</Typography.Paragraph>
         <Select style={{ width: "100%" }} value={model} onChange={setModel}
-                options={models.map((m) => ({ value: m.model, label: modelLabel(m) }))} />
+                options={models.map(modelOption)} />
         <TextField label="文本 A" value={a} onChange={setA} />
         <TextField label="文本 B" value={b} onChange={setB} rows={2} />
         <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
