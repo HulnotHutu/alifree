@@ -25,12 +25,15 @@ dashscope-call/
 ├── cmd/quota/            # 入口：quota fetch / serve / history
 ├── cmd/aihelpme/         # cli：有输入即提问 / 无输入取回答
 ├── cmd/aihelpmed/        # daemon：内存队列 + unix socket + AI 调用
+├── web-ui/               # React 前端（Vite + antd + ECharts）：看板与模型测试台
+├── webui.go              # go:embed web-ui/dist，单二进制托管 React SPA
 ├── internal/
 │   ├── aihelpme/         # cli/daemon 共用：daemon 内存队列、socket RPC、配置加载、compatible-mode 调用
 │   ├── bailian/          # ACS3 签名、CLI token、控制台网关、额度快照
+│   ├── dashscope/        # 模型推理客户端（OpenAI 兼容 + DashScope 原生）
 │   ├── store/            # SQLite 存储（snapshots + model_quotas 两表）
 │   ├── format/           # K/M 数字与到期日格式化
-│   └── app/              # cobra 命令、HTTP 看板服务、内嵌页面
+│   └── app/              # cobra 命令、Gin 服务、推理代理、SSE 任务进度
 ├── docs/                 # 详细文档（aihelpme、DashScope API curl 参考）
 ├── data/                 # SQLite 库（运行时生成，已 gitignore）
 ├── ROUTE.md              # DashScope API 路由调研
@@ -43,10 +46,13 @@ dashscope-call/
 需要 Go 1.24+（模块代理不通时可设 `HTTPS_PROXY=socks5://127.0.0.1:10808`）：
 
 ```bash
-make build     # 构建 bin/quota、bin/aihelpme 与 bin/aihelpmed
+make build     # 构建 bin/quota、bin/aihelpme 与 bin/aihelpmed（首次自动 npm install + 前端构建）
+make web       # 仅重建前端（web-ui/dist，改了 React 代码后跑）
 make test      # 单元测试
 make vet fmt   # 静态检查与格式化
 ```
+
+前端开发热重载：`cd web-ui && npm run dev`（Vite HMR，/api 代理到本机 8377）+ `air -c .air.toml`（Go 热重载）；生产模式由 `quota serve` 直接托管 embed 的 React 构建产物。
 
 ## 终端 AI 异步问答（aihelpme）
 
@@ -140,8 +146,8 @@ JSON 输出结构（`--json`，与旧版 Python 工具的归档格式完全一�
 - 数据源是项目内的 SQLite 库 `data/quota.db`（`--db` / `BAILIAN_DB` 可改，WAL 模式）；
 - 首次打开库时，会把旧版 JSON 归档（`~/.local/share/bailian-quota/free-quota-*.json`）一次性迁入，旧文件保留不动；
 - 页面右上角的「刷新」按钮抓取一次并写入库，需要凭证（见下节）；
-- **可视化面板**（ECharts 5.6，已 vendor 进二进制、离线可用）：各类型剩余额度、到期时间分布、剩余比例分布、快照历史趋势（随 cron 每日抓取自然生长）；前三张图跟随当前筛选视图，标题处显示可视化范围；
-- **模型测试台**（`/playground`）：五大模型类型各自的输入/输出形态——文本对话、文生图/视频生成（异步轮询）、图+文理解、语音识别、向量相似度；走服务端代理 `/api/infer/*`，`DASHSCOPE_API_KEY`（sk-）只在服务端使用，凭证文件加一行即用；
+- **可视化面板**（ECharts，随 React 构建打包进二进制）：各类型剩余额度、到期时间分布、剩余比例分布、快照历史趋势（随 cron 每日抓取自然生长）；前三张图跟随当前筛选视图；
+- **模型测试台**（`/playground`）：七大模型类型各自的输入/输出形态与官方参数——文本对话、文生图/视频生成（提交立即返回，进度经 SSE 实时推送）、图+文理解、语音识别、语音合成、向量相似度、排序；走服务端代理 `/api/infer/*`，`DASHSCOPE_API_KEY`（sk-）只在服务端使用，凭证文件加一行即用；
 - 列表支持搜索、类型筛选、点表头排序与分页（每页 20/50/100 可选），筛选或排序变化自动回到第一页；
 - 服务只绑定 `127.0.0.1`，凭证只在服务端进程内使用，不会发送到浏览器；
 - HTTP API：`GET /api/quota`（最新快照 JSON）、`GET /api/history`（抓取历史）、`POST /api/refresh`（抓取并入库）；

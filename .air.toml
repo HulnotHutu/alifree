@@ -1,0 +1,17 @@
+# Go 热重载：air -c .air.toml（前端另有 Vite HMR，见 web-ui/）
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "go build -o ./bin/quota ./cmd/quota"
+bin = "./bin/quota"
+full_bin = "./bin/quota serve --db data/quota.db"
+include_ext = ["go"]
+exclude_dir = ["web-ui", "data", "bin", "tmp", ".zcode", ".archify"]
+delay = 800
+
+[log]
+time = false
+
+[misc]
+clean_on_exit = true

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   AutoComplete,
@@ -7,9 +7,11 @@ import {
   Collapse,
   Input,
   InputNumber,
+  Progress,
   Select,
   Space,
   Slider,
+  Steps,
   Switch,
   Tabs,
   Tag,
@@ -26,15 +28,30 @@ import {
   inferImageGen,
   inferRerank,
   inferTTS,
+  subscribeTask,
 } from "../api";
 import type { ChatMessage, InferEnvelope, ModelQuota } from "../types";
 import { fmtNum } from "../types";
+import { useInfer } from "../hooks/useInfer";
 
 const VIDEO_MODELS = new Set(["wan3.0-video-prime"]);
 
+// 视频异步任务的终态集合；SSE 流在终态后由服务端结束
+const TASK_TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELED", "UNKNOWN", "TIMEOUT"]);
+
+// 视频任务进度跟踪：提交后由 SSE 事件流更新
+type VideoTrack = {
+  taskId: string;
+  status: string;
+  elapsed: number;
+  message?: string;
+  result?: { urls: string[] } | null;
+  error?: string | null;
+};
+
 const TAB_DESC: Record<string, string> = {
   text: "纯文本对话：文本进 → 文本出。",
-  vision: "图像/视频生成：文本进 → 图片或视频出（异步任务，提交后自动轮询）。",
+  vision: "图像/视频生成：文本进 → 图片出；视频为异步任务，提交后经 SSE 推送轮询进度。",
   multimodal: "图文混合理解：图片（可选）+ 提问 → 文本出。",
   audio: "语音识别：音频进 → 文本出。",
   tts: "语音合成：文本进 → 音频出（官方 HTTP 接口，返回音频 URL）。",
@@ -44,14 +61,15 @@ const TAB_DESC: Record<string, string> = {
 
 type TabKey = "text" | "vision" | "multimodal" | "audio" | "tts" | "embedding" | "rerank";
 
+// 本类模型匹配规则：每个 tab 只出现功能类型匹配的模型，严格过滤
 const PICK: Record<TabKey, (m: ModelQuota) => boolean> = {
   text: (m) => m.type === "Text",
-  vision: (m) => ["qwen-image-2.1-turbo", "qwen-image-2.1-pro", "wan3.0-video-prime"].includes(m.model),
-  multimodal: (m) => m.model === "qwen3.8-omni-flash",
-  audio: (m) => ["qwen-audio-3.1-asr-flash", "qwen-audio-3.1-asr-flash-message"].includes(m.model),
+  vision: (m) => m.type === "Vision",
+  multimodal: (m) => m.type === "Multimodal",
+  audio: (m) => m.type === "Audio" && /asr/i.test(m.model),
   tts: (m) => /tts|cosyvoice/i.test(m.model),
-  embedding: (m) => m.model.includes("text-embedding"),
-  rerank: (m) => m.model.includes("rerank"),
+  embedding: (m) => m.type === "Embedding" && !/rerank/i.test(m.model),
+  rerank: (m) => /rerank/i.test(m.model),
 };
 
 const FALLBACK: Record<TabKey, string[]> = {
@@ -89,6 +107,7 @@ function modelOption(m: ModelQuota) {
   };
 }
 
+// 模型下拉：只列本类模型（PICK 按快照类型严格匹配），支持按模型名搜索。
 function ModelSelect({
   value,
   onChange,
@@ -100,10 +119,14 @@ function ModelSelect({
 }) {
   return (
     <Select
+      showSearch
       style={{ width: "100%" }}
       value={value}
       onChange={onChange}
       options={models.map(modelOption)}
+      filterOption={(input, opt) =>
+        String(opt?.value ?? "").toLowerCase().includes(input.toLowerCase())
+      }
     />
   );
 }
@@ -154,14 +177,24 @@ export default function Playground() {
     }).catch(() => {});
   }, []);
 
+  // 本类匹配模型：FALLBACK 推荐型号排最前（默认选中），其余按名称排序；
+  // 快照缺失时退化为推荐名单
   const modelsBy = useMemo(() => {
     const by: Record<string, ModelQuota[]> = {};
     for (const tk of Object.keys(PICK) as TabKey[]) {
       const list = models ? models.filter(PICK[tk]) : [];
-      by[tk] = list.length ? list : (FALLBACK[tk] || []).map((model) => ({ model } as ModelQuota));
+      const matched = list.length ? [...list] : (FALLBACK[tk] || []).map((model) => ({ model } as ModelQuota));
+      const pref = FALLBACK[tk] ?? [];
+      matched.sort((a, b) => {
+        const ra = pref.indexOf(a.model) < 0 ? 99 : pref.indexOf(a.model);
+        const rb = pref.indexOf(b.model) < 0 ? 99 : pref.indexOf(b.model);
+        return ra !== rb ? ra - rb : a.model.localeCompare(b.model);
+      });
+      by[tk] = matched;
     }
     return by;
   }, [models]);
+
 
   function Err({ out }: { out: InferEnvelope | null }) {
     if (!out || out.ok) return null;
@@ -270,13 +303,11 @@ function TextTab({ models, Err, Latency }: {
   const [topP, setTopP] = useState(0.8);
   const [maxTokens, setMaxTokens] = useState<number | null>(null);
   const [thinking, setThinking] = useState(false);
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out, loading, send, fail } = useInfer((body: Parameters<typeof inferChat>[0]) => inferChat(body));
 
   function run() {
     if (!model) return;
-    if (!prompt.trim()) { setOut({ ok: false, error: "请输入提示词。" }); return; }
-    setLoading(true); setOut(null);
+    if (!prompt.trim()) { fail("请输入提示词。"); return; }
     const body: { model: string; messages: ChatMessage[]; [key: string]: unknown } = {
       model,
       messages: [{ role: "user", content: prompt }],
@@ -285,7 +316,7 @@ function TextTab({ models, Err, Latency }: {
     };
     if (maxTokens) body.max_tokens = maxTokens;
     if (thinking) body.enable_thinking = true;
-    inferChat(body).then(setOut).finally(() => setLoading(false));
+    send(body);
   }
 
   const msg = out?.ok ? (out.data?.choices?.[0]?.message?.content || "(空响应)") : null;
@@ -296,7 +327,7 @@ function TextTab({ models, Err, Latency }: {
         <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">模型</Typography.Paragraph>
         <ModelSelect value={model} onChange={setModel} models={models} />
         <TextField label="提示词" value={prompt} onChange={setPrompt}
-                   placeholder="请输入提示词，例如：用一句话介绍你自己" />
+                   placeholder="请输入提示词" />
         <Advanced>
           <Sampling temp={temp} setTemp={setTemp} topP={topP} setTopP={setTopP}
                     defaults={{ temp: 0.7, topP: 0.8 }} />
@@ -356,14 +387,19 @@ function VisionTab({ models, Err, Latency }: {
   const [ratio, setRatio] = useState("adaptive");
   const [duration, setDuration] = useState(5);
   const [audio, setAudio] = useState(true);
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out: submitOut, loading: submitting, send, fail } = useInfer(
+    (req: Parameters<typeof inferImageGen>[0]) => inferImageGen(req),
+  );
   const kind = VIDEO_MODELS.has(model) ? "video" : "image";
+
+  // 视频异步任务：提交立即返回 taskId，经 SSE 接收轮询状态
+  const [video, setVideo] = useState<VideoTrack | null>(null);
+  const esRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => esRef.current?.(), []); // 组件卸载时断开流
 
   function run() {
     if (!model) return;
-    if (!prompt.trim()) { setOut({ ok: false, error: "请输入画面描述。" }); return; }
-    setLoading(true); setOut(null);
+    if (!prompt.trim()) { fail("请输入画面描述。"); return; }
     const params: Record<string, any> = { prompt_extend: extend, watermark };
     if (kind === "video") {
       params.resolution = resolution;
@@ -374,12 +410,52 @@ function VisionTab({ models, Err, Latency }: {
       params.size = size;
     }
     if (seed != null && seed >= 0) params.seed = seed;
-    inferImageGen({ model, prompt, kind: kind as "image" | "video", params })
-      .then(setOut)
-      .finally(() => setLoading(false));
+    if (kind === "video") {
+      esRef.current?.(); // 新任务：断开旧任务的状态流
+      esRef.current = null;
+      setVideo(null);
+    }
+    send({ model, prompt, kind: kind as "image" | "video", params });
   }
 
-  const urls: string[] = out?.ok ? out.data?.urls ?? [] : [];
+  useEffect(() => {
+    const taskId = submitOut?.ok ? submitOut.data?.taskId : null;
+    if (!taskId || esRef.current) return;
+    esRef.current = subscribeTask(
+      taskId,
+      (evt) => {
+        if (evt.error) {
+          setVideo((v) => (v ? { ...v, error: evt.error!.error || "任务查询失败" } : v));
+          esRef.current?.();
+          esRef.current = null;
+          return;
+        }
+        setVideo((v) => ({
+          taskId,
+          status: evt.status,
+          elapsed: evt.elapsed ?? v?.elapsed ?? 0,
+          message: evt.message ?? v?.message,
+          result: evt.status === "SUCCEEDED" ? { urls: evt.urls ?? [] } : v?.result ?? null,
+          error:
+            TASK_TERMINAL.has(evt.status) && evt.status !== "SUCCEEDED"
+              ? evt.message || (evt.status === "TIMEOUT" ? "生成超时" : "任务失败：" + evt.status)
+              : null,
+        }));
+        if (TASK_TERMINAL.has(evt.status)) {
+          esRef.current?.();
+          esRef.current = null;
+        }
+      },
+      () => {
+        // 连接中断且未到终态（服务端只在终态主动结束流）
+        setVideo((v) => (v && !TASK_TERMINAL.has(v.status) ? { ...v, error: "连接中断，任务可能仍在执行" } : v));
+        esRef.current?.();
+        esRef.current = null;
+      },
+    );
+  }, [submitOut]);
+
+  const urls: string[] = submitOut?.ok ? submitOut.data?.urls ?? [] : [];
   const isVideo = kind === "video";
   return (
     <Pane>
@@ -387,7 +463,7 @@ function VisionTab({ models, Err, Latency }: {
         <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">模型（图像生成 / 视频生成）</Typography.Paragraph>
         <ModelSelect value={model} onChange={setModel} models={models} />
         <TextField label="画面描述" value={prompt} onChange={setPrompt}
-                   placeholder="例如：一只戴着宇航员头盔的橘猫，漂浮在星云中，赛博朋克风格" />
+                   placeholder="请输入画面描述" />
         {!isVideo && (
           <>
             <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">尺寸</Typography.Paragraph>
@@ -404,7 +480,7 @@ function VisionTab({ models, Err, Latency }: {
         <Advanced>
           {!isVideo && (
             <TextField label="反向提示词 negative_prompt（≤500 字符）" value={negative} onChange={setNegative} rows={2}
-                       placeholder="不希望出现的内容，例如：低分辨率，低画质" />
+                       placeholder="不希望出现的内容" />
           )}
           {isVideo && (
             <>
@@ -445,21 +521,56 @@ function VisionTab({ models, Err, Latency }: {
                          value={seed} onChange={(v) => setSeed(v ?? null)} />
           </div>
         </Advanced>
-        <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
+        <Button type="primary" loading={submitting} onClick={run} style={{ marginTop: 14 }} block>
           生成{isVideo ? "视频（1–4 分钟）" : "图片（10–30 秒）"}
         </Button>
         <Typography.Paragraph type="secondary" style={{ marginTop: 10, fontSize: 12.5 }}>
-          异步任务提交后自动轮询；产物 URL 有效期 24 小时，及时保存。
+          {isVideo
+            ? "提交后立即返回，生成进度经 SSE 实时推送；产物 URL 有效期 24 小时，及时保存。"
+            : "图片为同步接口，约 10–30 秒返回；产物 URL 有效期 24 小时，及时保存。"}
         </Typography.Paragraph>
       </Card>
-      <OutCard>
-        {out && !out.ok ? <Err out={out} /> :
-          urls.length ? (
-            (kind === "video"
-              ? urls.map((u) => <video key={u} src={u} controls style={{ maxWidth: "100%", borderRadius: 8 }} />)
-              : urls.map((u) => <img key={u} src={u} alt="生成结果" style={{ maxWidth: "100%", borderRadius: 8, marginBottom: 8 }} />))
+      <OutCard title={isVideo ? "输出（进度实时推送）" : "输出"}>
+        {submitOut && !submitOut.ok ? <Err out={submitOut} /> :
+          video?.error ? <Alert type="error" showIcon message={video.error} /> :
+          isVideo ? (
+            video?.result ? (
+              video.result.urls.map((u) => (
+                <video key={u} src={u} controls style={{ maxWidth: "100%", borderRadius: 8 }} />
+              ))
+            ) : video ? (
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                <Steps
+                  size="small"
+                  current={video.status === "PENDING" ? 1 : video.status === "RUNNING" ? 2 : 3}
+                  status={video.status === "SUCCEEDED" ? "finish" : TASK_TERMINAL.has(video.status) ? "error" : "process"}
+                  items={[{ title: "已提交" }, { title: "排队中" }, { title: "生成中" }, { title: "完成" }]}
+                />
+                <Progress
+                  percent={video.status === "SUCCEEDED" ? 100 : Math.min(Math.round((video.elapsed / 240000) * 100), 95)}
+                  strokeColor={video.status === "PENDING" ? "#98A2B3" : "#DD8E00"}
+                  size={["100%", 8] as [string | number, number]}
+                  showInfo={false}
+                />
+                <Space size={10}>
+                  <Tag color={video.status === "RUNNING" ? "processing" : "default"}>{video.status}</Tag>
+                  <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+                    已等待 {Math.round(video.elapsed / 1000)} 秒（视频一般需要 1–4 分钟）
+                  </Typography.Text>
+                </Space>
+                <Typography.Paragraph className="mono" type="secondary" style={{ fontSize: 12, marginBottom: 0, wordBreak: "break-all" }}>
+                  任务 {video.taskId}
+                </Typography.Paragraph>
+              </Space>
+            ) : (
+              <Typography.Text type="secondary">已提交，等待服务端推送状态…</Typography.Text>
+            )
+          ) : urls.length ? (
+            urls.map((u) => (
+              <img key={u} src={u} alt="生成结果" style={{ maxWidth: "100%", borderRadius: 8, marginBottom: 8 }} />
+            ))
           ) : <Typography.Text type="secondary">等待请求…</Typography.Text>}
-        <Latency out={out} />
+        <Latency out={submitOut} />
       </OutCard>
     </Pane>
   );
@@ -475,29 +586,24 @@ function MultimodalTab({ models, Err, Latency }: {
   const [temp, setTemp] = useState(0.7);
   const [topP, setTopP] = useState(0.8);
   const [file, setFile] = useState<File | null>(null);
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out, loading, send, fail } = useInfer((body: Parameters<typeof inferChat>[0]) => inferChat(body));
 
   async function run() {
-    setLoading(true); setOut(null);
     try {
-      if (!prompt.trim()) throw new Error("请输入提问。");
+      if (!prompt.trim()) { fail("请输入提问。"); return; }
       const content: any[] = [];
       if (file) {
-        if (file.size > 10 * 1024 * 1024) throw new Error("图片超过 10MB。");
+        if (file.size > 10 * 1024 * 1024) { fail("图片超过 10MB。"); return; }
         const dataUrl = await fileToBase64(file);
         content.push({ type: "image_url", image_url: { url: dataUrl } });
       }
       content.push({ type: "text", text: prompt });
-      const out = await inferChat({
+      send({
         model, messages: [{ role: "user", content }], modalities: ["text"],
         temperature: temp, top_p: topP,
       });
-      setOut(out);
     } catch (e: any) {
-      setOut({ ok: false, error: e.message });
-    } finally {
-      setLoading(false);
+      fail(e.message);
     }
   }
 
@@ -519,7 +625,7 @@ function MultimodalTab({ models, Err, Latency }: {
           <Typography.Paragraph style={{ margin: "8px 0 0" }}>点击或拖拽图片到这里</Typography.Paragraph>
         </Upload.Dragger>
         <TextField label="提问" value={prompt} onChange={setPrompt}
-                   placeholder="例如：请用两句话描述这张图片。" />
+                   placeholder="请输入提问" />
         <Advanced>
           <Sampling temp={temp} setTemp={setTemp} topP={topP} setTopP={setTopP}
                     defaults={{ temp: 0.7, topP: 0.8 }} />
@@ -546,13 +652,11 @@ function AudioTab({ models, Err, Latency }: {
   const [language, setLanguage] = useState("");
   const [itn, setItn] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out, loading, send, fail } = useInfer((body: Parameters<typeof inferChat>[0]) => inferChat(body));
 
   async function run() {
-    if (!file) { setOut({ ok: false, error: "请选择音频文件（wav/mp3）。" }); return; }
-    if (file.size > 10 * 1024 * 1024) { setOut({ ok: false, error: "音频超过 10MB。" }); return; }
-    setLoading(true); setOut(null);
+    if (!file) { fail("请选择音频文件（wav/mp3）。"); return; }
+    if (file.size > 10 * 1024 * 1024) { fail("音频超过 10MB。"); return; }
     try {
       const dataUrl = await fileToBase64(file);
       // 官方协议：data 为完整 Data URI（data:audio/wav;base64,<data>）或音频 URL，无 format 字段
@@ -569,12 +673,9 @@ function AudioTab({ models, Err, Latency }: {
         }],
         asr_options: asrOptions,
       };
-      const out = await inferChat(body);
-      setOut(out);
+      send(body);
     } catch (e: any) {
-      setOut({ ok: false, error: e.message });
-    } finally {
-      setLoading(false);
+      fail(e.message);
     }
   }
 
@@ -596,7 +697,7 @@ function AudioTab({ models, Err, Latency }: {
           <Typography.Paragraph style={{ margin: "8px 0 0" }}>点击或拖拽音频到这里</Typography.Paragraph>
         </Upload.Dragger>
         <TextField label="附加指令（可选）" value={prompt} onChange={setPrompt} rows={2}
-                   placeholder="可选：例如 请把这段语音转写成文字" />
+                   placeholder="可选：输入针对这段音频的指令" />
         <Advanced>
           <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">language（音频语言；官方默认自动检测）</Typography.Paragraph>
           <Select style={{ width: "100%" }} value={language} onChange={setLanguage}
@@ -635,13 +736,13 @@ function EmbeddingTab({ models, Err, Latency }: {
   const [dimensions, setDimensions] = useState(1024);
   const [a, setA] = useState("");
   const [b, setB] = useState("");
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out, loading, send, fail } = useInfer(
+    (m: string, xs: string[], d: number) => inferEmbeddings(m, xs, d),
+  );
 
   function run() {
-    if (!a.trim() || !b.trim()) { setOut({ ok: false, error: "请输入两段文本。" }); return; }
-    setLoading(true); setOut(null);
-    inferEmbeddings(model, [a, b], dimensions).then(setOut).finally(() => setLoading(false));
+    if (!a.trim() || !b.trim()) { fail("请输入两段文本。"); return; }
+    send(model, [a, b], dimensions);
   }
 
   const vecs: number[][] = out?.ok ? (out.data?.data ?? []).map((e: any) => e.embedding) : [];
@@ -656,9 +757,9 @@ function EmbeddingTab({ models, Err, Latency }: {
         <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">模型</Typography.Paragraph>
         <ModelSelect value={model} onChange={setModel} models={models} />
         <TextField label="文本 A" value={a} onChange={setA}
-                   placeholder="输入第一段文本，例如：阿里巴巴的百炼平台提供大模型服务" />
+                   placeholder="请输入第一段文本" />
         <TextField label="文本 B" value={b} onChange={setB} rows={2}
-                   placeholder="输入第二段文本，例如：阿里云上可以调用通义千问系列的模型" />
+                   placeholder="请输入第二段文本" />
         <Advanced>
           <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">
             dimensions（输出维度，官方默认 1024；flash 系列支持 1024/768/512/256）
@@ -742,9 +843,10 @@ function TTSTab({ models, Err, Latency }: {
   const [voice, setVoice] = useState(voiceOptions(models[0]?.model ?? "")[0][0]);
   const [format, setFormat] = useState("wav");
   const [sampleRate, setSampleRate] = useState(24000);
+  const [languageType, setLanguageType] = useState("Auto");
   const [instruction, setInstruction] = useState("");
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out, loading, send, fail } = useInfer((req: Parameters<typeof inferTTS>[0]) => inferTTS(req));
+  const qwen3 = /qwen3-tts/.test(model);
 
   function pickModel(m: string) {
     setModel(m);
@@ -753,12 +855,18 @@ function TTSTab({ models, Err, Latency }: {
 
   function run() {
     if (!model) return;
-    if (!text.trim()) { setOut({ ok: false, error: "请输入要合成的文本。" }); return; }
-    if (!voice.trim()) { setOut({ ok: false, error: "请填写音色 voice。" }); return; }
-    setLoading(true); setOut(null);
-    const input: Record<string, any> = { text, voice, format, sample_rate: sampleRate };
-    if (instruction.trim()) input.instruction = instruction.trim();
-    inferTTS({ model, input }).then(setOut).finally(() => setLoading(false));
+    if (!text.trim()) { fail("请输入要合成的文本。"); return; }
+    if (!voice.trim()) { fail("请填写音色 voice。"); return; }
+    const input: Record<string, any> = { text, voice };
+    if (qwen3) {
+      // qwen3-tts 走 multimodal-generation 端点，不支持 format/sample_rate/instruction
+      if (languageType && languageType !== "Auto") input.language_type = languageType;
+    } else {
+      input.format = format;
+      input.sample_rate = sampleRate;
+      if (instruction.trim()) input.instruction = instruction.trim();
+    }
+    send({ model, input });
   }
 
   const url: string | null = out?.ok ? out.data?.urls?.[0] ?? null : null;
@@ -768,7 +876,7 @@ function TTSTab({ models, Err, Latency }: {
         <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">模型（语音合成）</Typography.Paragraph>
         <ModelSelect value={model} onChange={pickModel} models={models} />
         <TextField label="待合成文本" value={text} onChange={setText}
-                   placeholder="例如：今天天气真不错，适合出去走走。" />
+                   placeholder="请输入要合成的文本" />
         <Typography.Paragraph style={{ marginBottom: 4, marginTop: 10 }} type="secondary">
           音色 voice（需与模型匹配，可手动输入官方音色列表中的其他音色）
         </Typography.Paragraph>
@@ -778,22 +886,35 @@ function TTSTab({ models, Err, Latency }: {
           onChange={setVoice}
           options={voiceOptions(model).map(([value, label]) => ({ value, label }))}
         />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
-          <div>
-            <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">音频格式 format</Typography.Paragraph>
-            <Select style={{ width: "100%" }} value={format} onChange={setFormat}
-                    options={["wav", "mp3", "pcm"].map((v) => ({ value: v, label: v }))} />
+        {!qwen3 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+            <div>
+              <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">音频格式 format</Typography.Paragraph>
+              <Select style={{ width: "100%" }} value={format} onChange={setFormat}
+                      options={["wav", "mp3", "pcm"].map((v) => ({ value: v, label: v }))} />
+            </div>
+            <div>
+              <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">采样率 sample_rate</Typography.Paragraph>
+              <Select style={{ width: "100%" }} value={sampleRate} onChange={setSampleRate}
+                      options={[24000, 22050, 16000, 8000].map((v) => ({ value: v, label: v }))} />
+            </div>
           </div>
-          <div>
-            <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">采样率 sample_rate</Typography.Paragraph>
-            <Select style={{ width: "100%" }} value={sampleRate} onChange={setSampleRate}
-                    options={[24000, 22050, 16000, 8000].map((v) => ({ value: v, label: v }))} />
+        ) : (
+          <div style={{ marginTop: 10 }}>
+            <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">
+              language_type（qwen3-tts 系列；固定输出 24kHz wav）
+            </Typography.Paragraph>
+            <Select style={{ width: "100%" }} value={languageType} onChange={setLanguageType}
+                    options={["Auto", "Chinese", "English", "Japanese", "Korean", "French", "German",
+                      "Italian", "Portuguese", "Spanish", "Russian"].map((v) => ({ value: v, label: v }))} />
           </div>
-        </div>
-        <Advanced>
-          <TextField label="instruction 说话风格指令（仅部分模型支持）" value={instruction} onChange={setInstruction} rows={2}
-                     placeholder="可选：用自然语言描述风格，例如：用轻快愉悦的语气说" />
-        </Advanced>
+        )}
+        {!qwen3 && (
+          <Advanced>
+            <TextField label="instruction 说话风格指令（仅部分模型支持）" value={instruction} onChange={setInstruction} rows={2}
+                       placeholder="可选：用自然语言描述说话风格" />
+          </Advanced>
+        )}
         <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           合成
         </Button>
@@ -830,8 +951,9 @@ function RerankTab({ models, Err, Latency }: {
   const [topN, setTopN] = useState<number | null>(null);
   const [returnDocs, setReturnDocs] = useState(true);
   const [instruct, setInstruct] = useState("");
-  const [out, setOut] = useState<InferEnvelope | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { out, loading, send, fail } = useInfer((req: Parameters<typeof inferRerank>[0]) =>
+    inferRerank(req),
+  );
   const documents = useMemo(
     () => docs.split("\n").map((s) => s.trim()).filter(Boolean),
     [docs],
@@ -839,13 +961,12 @@ function RerankTab({ models, Err, Latency }: {
 
   function run() {
     if (!model) return;
-    if (!query.trim()) { setOut({ ok: false, error: "请输入查询 query。" }); return; }
-    if (!documents.length) { setOut({ ok: false, error: "请输入至少一条候选文档（每行一条）。" }); return; }
-    setLoading(true); setOut(null);
+    if (!query.trim()) { fail("请输入查询 query。"); return; }
+    if (!documents.length) { fail("请输入至少一条候选文档（每行一条）。"); return; }
     const params: Record<string, any> = { return_documents: returnDocs };
     if (topN && topN > 0) params.top_n = topN;
     if (instruct.trim()) params.instruct = instruct.trim();
-    inferRerank({ model, query, documents, params }).then(setOut).finally(() => setLoading(false));
+    send({ model, query, documents, params });
   }
 
   type RerankResult = { index: number; relevance_score: number; document?: { text?: string } };
@@ -857,9 +978,9 @@ function RerankTab({ models, Err, Latency }: {
         <Typography.Paragraph style={{ marginBottom: 4 }} type="secondary">模型（排序）</Typography.Paragraph>
         <ModelSelect value={model} onChange={setModel} models={models} />
         <TextField label="查询 query" value={query} onChange={setQuery} rows={2}
-                   placeholder="例如：什么是文本排序模型" />
+                   placeholder="请输入查询" />
         <TextField label="候选文档 documents（每行一条）" value={docs} onChange={setDocs} rows={6}
-                   placeholder={"第一行一条候选文档，例如：\n文本排序模型广泛用于搜索引擎和推荐系统中\n量子计算是计算科学的一个前沿领域"} />
+                   placeholder={"每行一条候选文档"} />
         <Advanced>
           <div style={{ marginTop: 4 }}>
             <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>top_n（只返回前 N 条，留空返回全部）</Typography.Text>
@@ -875,7 +996,7 @@ function RerankTab({ models, Err, Latency }: {
             </Space>
           </div>
           <TextField label="instruct 任务指令（仅 qwen3 系列排序模型支持）" value={instruct} onChange={setInstruct} rows={2}
-                     placeholder="可选：例如 Given a web search query, retrieve relevant passages" />
+                     placeholder="可选：描述检索任务" />
         </Advanced>
         <Button type="primary" loading={loading} onClick={run} style={{ marginTop: 14 }} block>
           排序

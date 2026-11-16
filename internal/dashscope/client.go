@@ -9,11 +9,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/packages/param"
 )
 
 const baseURL = "https://dashscope.aliyuncs.com"
@@ -56,6 +61,27 @@ func asAPIError(err error, target **APIError) bool {
 		return true
 	}
 	return false
+}
+
+// oaiCompatible 构建指向 DashScope OpenAI 兼容模式的官方 SDK 客户端。
+// 低层 Execute/Post 保留 SDK 的鉴权与错误类型，body 原样透传，
+// 便于携带 asr_options 等 DashScope 扩展字段。
+func oaiCompatible(key string) *openai.Client {
+	client := openai.NewClient(
+		option.WithAPIKey(key),
+		option.WithBaseURL(baseURL+"/compatible-mode/v1"),
+	)
+	return &client
+}
+
+// convertErr 把官方 SDK 的错误映射为本包的 APIError，
+// inferErr / IsFreeTierExhausted 等上层逻辑无需感知 SDK。
+func convertErr(err error) error {
+	var oe *openai.Error
+	if errors.As(err, &oe) {
+		return &APIError{Status: oe.StatusCode, Code: oe.Code, Message: oe.Message}
+	}
+	return err
 }
 
 // do 发送 JSON 请求并返回响应体（非 2xx 时解析为 APIError）。
@@ -105,34 +131,71 @@ func (c *Client) do(ctx context.Context, method, path, key string, payload any, 
 }
 
 // ChatCompletion 调用 OpenAI 兼容的对话接口（文本 / 全模态 / 语音识别共用）。
-// req 为完整请求体：{model, messages: [...], modalities?: ["text"]}。
+// req 为完整请求体：{model, messages, temperature/top_p/enable_thinking,
+// asr_options 等 DashScope 扩展参数}，经官方 SDK 低层 Post 原样透传。
 func (c *Client) ChatCompletion(ctx context.Context, key string, req map[string]any) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodPost, "/compatible-mode/v1/chat/completions", key, req)
+	var raw json.RawMessage
+	if err := oaiCompatible(key).Post(ctx, "/chat/completions", req, &raw); err != nil {
+		return nil, convertErr(err)
+	}
+	return raw, nil
 }
 
-// Embeddings 调用向量化接口。dimensions 为可选输出维度
+// Embeddings 调用向量化接口（官方 SDK 类型化参数）。dimensions 为可选输出维度
 // （qwen3.7-text-embedding-flash 支持 1024/768/512/256，默认 1024）。
 func (c *Client) Embeddings(ctx context.Context, key, model string, inputs []string, dimensions int) (json.RawMessage, error) {
-	body := map[string]any{"model": model, "input": inputs}
-	if dimensions > 0 {
-		body["dimensions"] = dimensions
+	params := openai.EmbeddingNewParams{
+		Model: model,
+		Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: inputs},
 	}
-	return c.do(ctx, http.MethodPost, "/compatible-mode/v1/embeddings", key, body)
+	if dimensions > 0 {
+		params.Dimensions = param.NewOpt(int64(dimensions))
+	}
+	var raw json.RawMessage
+	if err := oaiCompatible(key).Post(ctx, "/embeddings", params, &raw); err != nil {
+		return nil, convertErr(err)
+	}
+	return raw, nil
 }
 
-// SynthesizeSpeech 调用非实时语音合成（HTTP 接口，非流式返回音频 URL）。
-// 端点：/api/v1/services/audio/tts/SpeechSynthesizer；
-// 音频地址在 output.audio.url。input 即官方 input 对象：
-// text/voice/format/sample_rate/instruction/language_hints 等。
+// SynthesizeSpeech 调用非实时语音合成（HTTP 接口，非流式返回音频 URL），
+// 按模型家族路由到官方对应端点：
+//   - qwen3-tts 系列 → /api/v1/services/aigc/multimodal-generation/generation
+//     （input 仅接受 text/voice/language_type；固定输出 24kHz wav，URL 有效期 24h）
+//   - qwen-audio-3.x-tts / cosyvoice → /api/v1/services/audio/tts/SpeechSynthesizer
+//     （input: text/voice/format/sample_rate/instruction）
 func (c *Client) SynthesizeSpeech(ctx context.Context, key, model string, input map[string]any) (string, error) {
-	raw, err := c.do(ctx, http.MethodPost,
-		"/api/v1/services/audio/tts/SpeechSynthesizer", key, map[string]any{
-			"model": model,
-			"input": input,
-		})
+	var (
+		raw json.RawMessage
+		err error
+	)
+	if strings.HasPrefix(model, "qwen3-tts") {
+		filtered := map[string]any{}
+		for _, k := range []string{"text", "voice", "language_type"} {
+			if v, ok := input[k].(string); ok && v != "" {
+				filtered[k] = v
+			}
+		}
+		raw, err = c.do(ctx, http.MethodPost,
+			"/api/v1/services/aigc/multimodal-generation/generation", key, map[string]any{
+				"model": model,
+				"input": filtered,
+			})
+	} else {
+		raw, err = c.do(ctx, http.MethodPost,
+			"/api/v1/services/audio/tts/SpeechSynthesizer", key, map[string]any{
+				"model": model,
+				"input": input,
+			})
+	}
 	if err != nil {
 		return "", err
 	}
+	return audioURLFromResponse(raw)
+}
+
+// audioURLFromResponse 从 TTS 响应中取 output.audio.url。
+func audioURLFromResponse(raw json.RawMessage) (string, error) {
 	var out struct {
 		Output struct {
 			Audio struct {

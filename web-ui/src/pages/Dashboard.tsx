@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -15,6 +15,7 @@ import {
 } from "antd";
 import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import ReactECharts from "echarts-for-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchHistory, fetchQuota, refreshQuota } from "../api";
 import type { ModelQuota, QuotaResponse, RunInfo } from "../types";
 import { TYPE_COLORS, TYPE_LABEL, fmtNum } from "../types";
@@ -53,26 +54,49 @@ function relativeExpiry(r: Row): { text: string; color?: string } {
 }
 
 export default function Dashboard() {
-  const [quota, setQuota] = useState<QuotaResponse | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [history, setHistory] = useState<RunInfo[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
+  const queryClient = useQueryClient();
   const [quick, setQuick] = useState<Quick>("可用");
   const [type, setType] = useState<string>("全部");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  useEffect(() => {
-    fetchQuota().then((out) => {
-      if (!out.ok) {
-        setLoadError(out.error || "加载失败");
-        return;
+  // 取数/刷新全部交给 TanStack Query：loading、错误、缓存统一管理
+  const quotaQuery = useQuery({
+    queryKey: ["quota"],
+    queryFn: fetchQuota,
+    refetchOnWindowFocus: false,
+    staleTime: 60_000,
+  });
+  const historyQuery = useQuery({
+    queryKey: ["history"],
+    queryFn: fetchHistory,
+    refetchOnWindowFocus: false,
+  });
+  const refreshMut = useMutation({
+    mutationFn: refreshQuota,
+    onSuccess: (out) => {
+      if (out.ok) {
+        queryClient.setQueryData(["quota"], out);
+        queryClient.invalidateQueries({ queryKey: ["history"] });
+        setPage(1);
       }
-      setQuota(out);
-    }).catch((e) => setLoadError(String(e)));
-    fetchHistory().then(setHistory).catch(() => {});
-  }, []);
+    },
+  });
+
+  const quota: QuotaResponse | null = quotaQuery.data ?? null;
+  const history: RunInfo[] = historyQuery.data ?? [];
+  const loadError: string | null = quotaQuery.isError
+    ? String(quotaQuery.error)
+    : quota && !quota.ok
+      ? quota.error || "加载失败"
+      : null;
+  const refreshing = refreshMut.isPending;
+  const refreshError: string | null = refreshMut.isError
+    ? String(refreshMut.error)
+    : refreshMut.data && !refreshMut.data.ok
+      ? refreshMut.data.error || "刷新失败"
+      : null;
 
   const rows: Row[] = useMemo(() => {
     const today = new Date();
@@ -133,19 +157,7 @@ export default function Dashboard() {
   }, [rows]);
 
   function doRefresh() {
-    setRefreshing(true);
-    refreshQuota()
-      .then((out) => {
-        if (out.ok) {
-          setQuota(out);
-          setPage(1);
-          fetchHistory().then(setHistory).catch(() => {});
-        } else {
-          setLoadError(out.error || "刷新失败");
-        }
-      })
-      .catch((e) => setLoadError(String(e)))
-      .finally(() => setRefreshing(false));
+    refreshMut.mutate();
   }
 
   // --- 图表 ---
@@ -367,6 +379,9 @@ export default function Dashboard() {
           showIcon
           message={`快照已 ${Math.round(ageHours / 24)} 天未更新，数值可能过期。配置 ~/.config/bailian-quota.env 后可点右上角刷新。`}
         />
+      )}
+      {refreshError && (
+        <Alert type="error" showIcon message={`刷新失败：${refreshError}`} />
       )}
 
       <Card

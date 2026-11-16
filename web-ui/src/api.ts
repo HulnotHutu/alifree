@@ -98,6 +98,32 @@ export async function inferRerank(req: {
   return res.json();
 }
 
+// 订阅异步任务（视频生成等）的 SSE 状态流；返回关闭函数。
+// 事件：{status, urls?, message?, elapsed?} 或 {error:{error, code?}}；
+// status 为 SUCCEEDED/FAILED/CANCELED/UNKNOWN/TIMEOUT 时服务端会结束流。
+export function subscribeTask(
+  taskId: string,
+  onEvent: (evt: {
+    status: string;
+    urls?: string[];
+    message?: string;
+    elapsed?: number;
+    error?: { error: string; code?: string };
+  }) => void,
+  onDisconnect: () => void,
+): () => void {
+  const es = new EventSource(`/api/infer/tasks/${encodeURIComponent(taskId)}/events`);
+  es.onmessage = (ev) => {
+    try {
+      onEvent(JSON.parse(ev.data));
+    } catch {
+      /* 忽略坏帧 */
+    }
+  };
+  es.onerror = () => onDisconnect();
+  return () => es.close();
+}
+
 export function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const fr = new FileReader();

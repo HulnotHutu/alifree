@@ -202,3 +202,107 @@ AK/SK 的合规获取（阿里云 RAM 文档）：
 
 实现：`internal/dashscope/client.go` 新增 `SynthesizeSpeech`/`Rerank`；`/api/infer/tts`、`/api/infer/rerank`
 两个服务端代理路由；Playground 7 标签页 + 各自高级参数；空输入守卫与音色-模型联动。
+
+**补充（同日实测）**：qwen3-tts-flash 不走 SpeechSynthesizer 端点（报 InvalidParameter: url error），
+它用 `POST /api/v1/services/aigc/multimodal-generation/generation`，input 仅接受
+text/voice/language_type（无 format/sample_rate，固定输出 24kHz wav，URL 24h 有效）。
+`SynthesizeSpeech` 已按模型家族路由；qwen-audio-3.1-tts-flash、cosyvoice-v3-flash、qwen3-tts-flash
+三族均真机验证返回音频 URL。
+
+## serve HTTP 层迁移到 Gin（2026-11-17）
+
+按用户要求把 `quota serve` 的 API 层从 net/http ServeMux 迁到 gin-gonic/gin（注意：aihelpme
+守护进程本身仍是 net/http，"类似"指的是其代码组织风格——struct 方法 handler、统一 writeJSON、
+请求日志中间件）。要点：
+
+- `server.router()`：ReleaseMode + slog 请求日志中间件（入口 debug / 出口 info，含 status 与
+  duration_ms，与 aihelpme 的 logRequests 同风格）+ gin.Recovery()；页面与静态资源直挂，
+  /api 分组，/api/infer 子分组五个推理代理；NoRoute 返回 JSON 404（与原行为一致）。
+- handler 全部迁移 `*gin.Context`；`bindJSON` 保留 16MB MaxBytesReader 限制。
+- JSON 线格式刻意保持不变（缩进 + SetEscapeHTML(false)，不经 gin 默认 render），前端零改动。
+- 冒烟全绿：quota/history/404/坏 JSON 友好提示/rerank 真机调用/playground HTML；go test ./... 通过。
+
+坑（再次）：pkill 与启动命令合并在一条 shell 里时，启动命令文本 `./bin/quota serve` 会被
+pkill 的 `-f "bin/quota [s]erve"` 模式命中，把自己整条命令杀掉——kill 与 start 必须分两次调用。
+
+## 框架化瘦身四件套（2026-11-17）
+
+按讨论结论落地 1+2+3+4：
+
+1. **TanStack Query（前端）**：main.tsx 挂 QueryClientProvider；Dashboard 三个数据源换
+   useQuery/useMutation（quota/history + 刷新 mutate → setQueryData/invalidateQueries），
+   Playground 七个 Tab 统一走新 hook `useInfer`（useMutation 包装，ok:false 归一成 Error，
+   校验失败 fail() 注入同一信封）。删掉 ~15 组手写 loading/out 状态与 .then/.finally 链。
+2. **Air 热重载**：`.air.toml`（build→bin/quota，full_bin 带 serve 参数，排除 web-ui/data/tmp），
+   `~/go/bin/air -c .air.toml` 接管 serve 进程，真机验证两次改动触发两次重建、服务不断。
+   注意 touch 只改 mtime 不触发 fsnotify，需真实内容改动。
+3. **gin binding tag**：embeddings/imagegen/tts/rerank 请求体加 `binding:"required"`（集合加
+   min=1），删除 5 处手写空值检查；校验错误经 bindJSON 统一返回信封。
+4. **openai-go/v3**：ChatCompletion 改走官方 SDK 低层 `Client.Post`（body 原样透传，保留
+   asr_options 等 DashScope 扩展）；Embeddings 改用类型化 EmbeddingNewParams（OfArrayOfStrings
+   + Dimensions param.Opt）。错误经 convertErr 映射回 *APIError，inferErr/IsFreeTierExhausted
+   无感。图像/视频/TTS/rerank 为 DashScope 原生接口，保持手写 do()。
+
+冒烟全绿：chat（SDK 透传，reasoning_content 正常）、embeddings（dimensions=256 生效）、
+rerank（原生路径）、binding 校验（空 model 拒绝）、浏览器看板/测试台；go test 通过。
+
+## 视频生成升级为 SSE 进度推送（2026-11-17）
+
+把「提交后同步挂起轮询 ≤5 分钟」改为「提交立即返回 + SSE 推送轮询状态」：
+
+- **POST /api/infer/imagegen**（kind=video）：创建任务后立即返回 `{taskId}`（实测 220ms）；
+  图像（qwen-image 同步接口）路径不变。
+- **GET /api/infer/tasks/{id}/events**（新增）：SSE 流式推送任务状态。服务端仍查官方
+  GET /tasks/{id}（限流 20QPS），但轮询间隔 2s 起指数退避至 15s；每个状态变化发
+  `data:{status, urls, message, elapsed}`，终态（SUCCEEDED/FAILED/CANCELED/UNKNOWN/TIMEOUT
+  ≤10min）后结束流。客户端断开（r.Context().Done）即停止轮询。
+- **前端 VisionTab**：提交后渲染 Steps（已提交→排队中→生成中→完成）+ 进度条（按已耗时/240s
+  估算，完成 100%）+ 状态 Tag + 已等待秒数 + taskId；终态渲染视频/错误。`subscribeTask`
+  （EventSource）在 api.ts；终态/断开时 close 防自动重连；重新订阅已完成任务会立即收到
+  一次终态事件（幂等）。
+- **旧版 playground.html**：视频路径同步改造为 EventSource + 状态行文本。
+
+**真机端到端**：wan3.0-video-prime 5s/1080P 视频提交 → RUNNING×4（间隔 2.1/4.1/8.1/15.1s，
+退避生效）→ 52 秒 SUCCEEDED，mp4 URL 直接推送。bogus taskId → UNKNOWN 终态事件。
+注意：看板额度数字来自快照，不实时反映这次消耗（wan3.0 快照 30 条，实际已用 1）。
+
+epoll vs 轮询的结论（讨论记录）：epoll 只解决「本地 fd 就绪」，远端业务事件必须有对端推送通道
+（WebSocket/SSE/EventBridge 回调）才可感知；百炼视频任务对本机工具唯一可行通道是轮询，
+EventBridge 回调需公网可达 URL（AsyncTaskFinish 事件），规模化后可升级为集中轮询器 + SSE。
+
+## 旧版 HTML 页面退役，React SPA 单二进制托管（2026-11-17）
+
+internal/app/static 的手写 dashboard.html / playground.html / echarts.min.js（共 ~1000 行
+HTML+CSS+JS）全部删除，功能已由 web-ui React 应用完整承接。`quota serve` 现在直接托管 React：
+
+- **webui.go**（模块根包）：`//go:embed all:web-ui/dist` + `Dist()` 返回 fs.FS；
+  embed 无法跨目录上溯，所以放在模块根。dist 不入库（.gitignore），构建顺序由
+  Makefile 保证：`build` 依赖 `web-ui/dist/index.html` 文件规则，fresh clone 首次
+  `make build` 自动 npm install + 前端构建；`make web` 强制重建前端。
+- **serve.go**：删除 handlePage/handlePlayground/handleEcharts 与 /static/echarts.min.js
+  路由；NoRoute 分流——/api 前缀或非 GET 保持 JSON 404，其余走 spa()：
+  dist 中存在的文件经 FileFromFS 直出，缺失路径回退 index.html（react-router 历史路由）。
+- 开发循环不变：Vite dev（5173，HMR）+ air（8377 Go 热重载）；改 React 后入库需
+  `make web && make build` 让 embed 拿到新 dist。
+- 验证：/ 与 /playground 返回 React 页面、/assets/*.js 200（2.3MB）、/favicon.svg 200、
+  /api/nope JSON 404、/nonexistent SPA 回退；浏览器在 8377 生产模式渲染看板（快照 #23）
+  与测试台（7 标签页），SPA 内部导航正常。README/Makefile 已同步。
+
+## 测试台模型下拉改为「本类优先 + 全量可选」（2026-11-17）
+
+用户指出测试台可选拼起来远不到 73 个——原 PICK 过滤太苛刻（vision/multimodal/audio 都是写死
+名单，只露出 ~19 个）。快照类型分布：Audio 55（ASR/TTS/realtime/translate 混在一起）、
+Text 7、Vision 4、Multimodal 3、Embedding 2、无类型 realtime 2。
+
+- PICK 改为按快照类型：text=Text、vision=Vision、multimodal=Multimodal、
+  audio=Audio∧/asr/i、tts=/tts|cosyvoice/i、embedding=Embedding∧¬rerank、rerank=/rerank/i。
+- ModelSelect 改分组下拉：本类模型（N）+ 其他有额度模型（M），每页 N+M=73 全部可选；
+  showSearch 按模型名过滤；默认选中 FALLBACK 推荐型号（排最前），其余按名称排序。
+- 实测：文本 7+66、语音识别 4+69，分组与搜索正常。
+
+**矫正（同日）**：「其他有额度模型」分组不合理——排序页里能选 TTS 模型是错误设计。已回归
+严格类型过滤：每个 tab 只出现功能匹配的模型（asr 4 / tts 3 / embedding 1 / rerank 1 /
+text 7 / vision 4 / multimodal 3 = 23 个），保留按名搜索。其余 50 个不可测试的原因：
+realtime WebSocket 族（qwen-audio-realtime、omni-realtime、paraformer-realtime、
+livetranslate-realtime 等约 45 个）与 paraformer 录音文件识别 REST 的调用协议
+测试台尚未实现——它们本来就不属于这 7 个 REST 形态的标签页。

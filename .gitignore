@@ -11,6 +11,9 @@ web-ui/dist/
 *.db-wal
 *.db-shm
 
+# Air 热重载工作目录
+/tmp/
+
 # 本地工具状态（IDE / agent 工作区）
 /.workbuddy/
 /.zcode/
