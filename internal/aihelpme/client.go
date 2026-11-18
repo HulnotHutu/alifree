@@ -41,25 +41,51 @@ func NewClient() *Client {
 // and leaving the answer for a later bare invocation.
 const askWait = 5 * time.Second
 
-// Ask submits one question and returns its outcome. In blocking mode (the
-// daemon default) it waits up to askWait: short questions finish inside
-// that window and come back immediately, longer ones return res == nil and
-// keep processing daemon-side — a later Fetch returns them. In stream mode
-// every delta is forwarded to onDelta as it arrives and the returned result
-// carries the full answer. When the daemon is not running it is spawned
-// detached and the submit is retried once.
-func Ask(question string, onDelta func(string)) (*Result, error) {
+// AskMode selects how Ask delivers the answer, overriding the daemon's
+// config.yaml stream default for this invocation.
+type AskMode int
+
+const (
+	ModeDefault AskMode = iota // 跟随 daemon 配置（config.yaml stream）
+	ModeStream                 // 强制流式：逐块回调 onDelta
+	ModeSync                   // 强制阻塞：等待至多 askWait
+	ModeAsync                  // 仅入队：立即返回，结果稍后 Fetch
+)
+
+// Ask submits one question and returns its outcome according to mode.
+// ModeDefault follows the daemon's config: streaming daemons forward every
+// delta to onDelta and return the full answer; blocking daemons wait up to
+// askWait and return res == nil when the answer is not ready in time — a
+// later Fetch returns them. ModeAsync returns res == nil right after the
+// submit. When the daemon is not running it is spawned detached and the
+// submit is retried once.
+func Ask(question string, mode AskMode, onDelta func(string)) (*Result, error) {
+	var want *bool
+	switch mode {
+	case ModeStream:
+		t := true
+		want = &t
+	case ModeSync, ModeAsync:
+		f := false
+		want = &f
+	}
 	c := NewClient()
-	id, stream, err := c.Put(question)
+	id, stream, err := c.Put(question, want)
 	if err != nil {
 		if spawnErr := spawnDaemon(); spawnErr != nil {
 			return nil, fmt.Errorf("aihelpmed 未运行且无法拉起（%v）", spawnErr)
 		}
-		if id, stream, err = c.Put(question); err != nil {
+		if id, stream, err = c.Put(question, want); err != nil {
 			return nil, err
 		}
 	}
-	if stream {
+	switch mode {
+	case ModeAsync:
+		return nil, nil // 仅入队，不等待不观看
+	case ModeStream:
+		return c.Stream(id, onDelta)
+	}
+	if stream { // ModeDefault 且 daemon 为流式配置
 		return c.Stream(id, onDelta)
 	}
 	return c.Wait(id)
@@ -151,9 +177,14 @@ func Fetch() (*Result, error) {
 }
 
 // Put sends one question to the daemon and returns its job id plus whether
-// the daemon runs in stream mode.
-func (c *Client) Put(question string) (string, bool, error) {
-	body, err := json.Marshal(map[string]string{"question": question})
+// the job will stream. stream==nil lets the daemon decide (config.yaml
+// stream); true/false overrides per job.
+func (c *Client) Put(question string, stream *bool) (string, bool, error) {
+	payload := map[string]any{"question": question}
+	if stream != nil {
+		payload["stream"] = *stream
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", false, err
 	}

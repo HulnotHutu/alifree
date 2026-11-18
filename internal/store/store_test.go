@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -212,5 +213,65 @@ func TestSavePreservesFetchedAt(t *testing.T) {
 	_, snap, _ := s.Latest()
 	if snap.FetchedAt != want {
 		t.Errorf("FetchedAt = %q, want %q", snap.FetchedAt, want)
+	}
+}
+
+// TestSaveRingRetention 验证环形保留：窗口恒定 maxSnapshots，最旧被淘汰且明细级联清理。
+func TestSaveRingRetention(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "quota.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const extra = 5
+	var lastID int64
+	for i := 0; i < maxSnapshots+extra; i++ {
+		id, err := s.Save(sampleSnapshot(fmt.Sprintf("2026-01-01T00:%02d:00+08:00", i), 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastID = id
+	}
+
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM snapshots`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != maxSnapshots {
+		t.Fatalf("环形窗口应恒定 %d，实际 %d", maxSnapshots, n)
+	}
+
+	// 最新快照在窗口内，最旧 5 份已被淘汰
+	if _, _, err := s.Latest(); err != nil {
+		t.Fatal(err)
+	}
+	var minID int64
+	if err := s.db.QueryRow(`SELECT MIN(id) FROM snapshots`).Scan(&minID); err != nil {
+		t.Fatal(err)
+	}
+	// 共写入 maxSnapshots+extra 份，窗口留 30：最旧保留 id = extra+1（前 extra 份被淘汰）
+	if minID != extra+1 {
+		t.Errorf("最旧保留 id = %d, want %d", minID, extra+1)
+	}
+
+	// 明细靠 CASCADE 清理：只剩窗口内快照的行
+	var qn int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM model_quotas WHERE snapshot_id NOT IN (SELECT id FROM snapshots)`,
+	).Scan(&qn); err != nil {
+		t.Fatal(err)
+	}
+	if qn != 0 {
+		t.Errorf("存在孤儿明细 %d 行，CASCADE 未生效", qn)
+	}
+
+	// History 只返回窗口内的数据，最新在前
+	runs, err := s.History(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != maxSnapshots || runs[0].ID != lastID {
+		t.Errorf("History = %d 条，最新 id = %d, want %d 条 / %d", len(runs), runs[0].ID, maxSnapshots, lastID)
 	}
 }

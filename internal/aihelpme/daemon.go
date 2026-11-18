@@ -21,6 +21,7 @@ import (
 type job struct {
 	ID       string
 	Question string
+	Stream   bool // 该任务是否以流式调用 API 并推送增量
 }
 
 // Result is the outcome of one question. It lives in daemon memory only and
@@ -89,19 +90,21 @@ func (d *Daemon) setPrompt(p string) {
 	d.mu.Unlock()
 }
 
-// Put appends a question to the queue and returns its job id. A worker
-// goroutine starts on the spot if the daemon is idle; otherwise the
-// question waits for the running one. Waiters can await the outcome through
-// Wait; in stream mode the deltas flow through the per-job channel exposed
-// by the /stream endpoint.
-func (d *Daemon) Put(question string) string {
-	j := &job{ID: newID(), Question: question}
+// Put appends a question to the queue and returns its job id and whether
+// the job will stream. stream==nil defers to the daemon default
+// (config.yaml stream); true/false overrides per job. A worker goroutine
+// starts on the spot if the daemon is idle. Waiters can await the outcome
+// through Wait; stream-mode deltas flow through the per-job channel
+// exposed by the /stream endpoint.
+func (d *Daemon) Put(question string, stream *bool) (string, bool) {
+	j := &job{ID: newID(), Question: question, Stream: d.cfg.Stream}
+	if stream != nil {
+		j.Stream = *stream
+	}
 	ch := make(chan *Result, 1) // buffered: the worker never blocks on send
 	d.mu.Lock()
 	d.notify[j.ID] = ch
-	if d.cfg.Stream {
-		d.streams[j.ID] = make(chan string, 256)
-	}
+	d.streams[j.ID] = make(chan string, 256) // 所有任务都注册：完成时关闭以触发 done
 	d.queue = append(d.queue, j)
 	idle := !d.working
 	d.working = true
@@ -109,7 +112,7 @@ func (d *Daemon) Put(question string) string {
 	if idle {
 		go d.work()
 	}
-	return j.ID
+	return j.ID, j.Stream
 }
 
 // Wait blocks until the job's result is available or the timeout elapses. A
@@ -173,7 +176,7 @@ func (d *Daemon) work() {
 		if prompt != "" {
 			msgs = append([]message{{Role: "system", Content: prompt}}, msgs...)
 		}
-		if d.cfg.Stream {
+		if j.Stream {
 			d.mu.Lock()
 			streamCh := d.streams[j.ID] // 一次性取出，闭包内不再碰 map（避免数据竞态）
 			d.mu.Unlock()
@@ -314,6 +317,7 @@ func (s *statusRecorder) Flush() {
 func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Question string `json:"question"`
+		Stream   *bool  `json:"stream"` // 可选：逐任务覆盖 daemon 的 stream 默认值
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		slog.Warn("invalid put request", "reason", "bad json body", "err", err)
@@ -325,10 +329,8 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `question empty, body should be {"question":"..."}`, http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":     d.Put(req.Question),
-		"stream": d.cfg.Stream,
-	})
+	id, stream := d.Put(req.Question, req.Stream)
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "stream": stream})
 }
 
 func (d *Daemon) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -433,15 +435,9 @@ func (d *Daemon) handlePutModel(w http.ResponseWriter, r *http.Request) {
 // handleStream backs GET /stream?id=...: forward the job's answer deltas as
 // server-sent events while the worker generates them, then a final event
 // carrying the complete answer. Disconnecting only stops watching: the
-// worker keeps going and the answer lands in the fetch queue. Only
-// available when stream mode is on.
+// worker keeps going and the answer lands in the fetch queue. Jobs
+// submitted without streaming deliver the full answer as one done event.
 func (d *Daemon) handleStream(w http.ResponseWriter, r *http.Request) {
-	if !d.cfg.Stream {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "stream 模式未开启（config.yaml: stream: true，改后重启）",
-		})
-		return
-	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Error(w, "missing id", http.StatusBadRequest)

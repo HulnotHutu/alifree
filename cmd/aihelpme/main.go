@@ -32,8 +32,11 @@ func main() {
 // usage 打印用法说明（--help/-h 触发）。
 func usage() {
 	fmt.Fprint(os.Stdout, `用法：
-  aihelpme "问题"              向 ai 提问（stream 模式逐字输出；阻塞模式短问题等待至多 5s）
-  cat 文档 | aihelpme "总结"   管道内容拼在问题后
+  aihelpme "问题"              交付方式跟随 config.yaml 的 stream 配置
+  aihelpme --stream "问题"     流式输出，逐字打印
+  aihelpme --sync "问题"       阻塞至多 5s，短问题当场得到回答
+  aihelpme --async "问题"      仅入队立即返回，稍后运行 aihelpme 取回答
+  cat 文档 | aihelpme "总结"   管道内容拼在问题后（可与上述参数组合）
   aihelpme                     取最新一次的回答（未就绪会提示稍等）
   aihelpme --help              本说明
 `)
@@ -57,17 +60,40 @@ func exit(err error) {
 	}
 }
 
-// runPut validates and assembles the question and hands it to the daemon.
-// Blocking mode: it waits up to five seconds, short questions print their
-// answer right here, longer ones leave a wait hint on stderr. Stream mode:
-// the answer is printed as it is generated.
+// runPut validates and assembles the question and hands it to the daemon
+// according to the selected mode: --stream prints the answer as it is
+// generated, --sync blocks up to five seconds, --async returns right after
+// the submit, and no flag follows the daemon's config.yaml stream default.
 func runPut(args []string) error {
-	question, err := readQuestion(args)
+	mode := aihelpme.ModeDefault
+	var rest []string
+	for _, a := range args {
+		switch a {
+		case "--stream":
+			if mode != aihelpme.ModeDefault {
+				return fmt.Errorf("模式参数冲突：--stream/--sync/--async 只能用一个")
+			}
+			mode = aihelpme.ModeStream
+		case "--sync":
+			if mode != aihelpme.ModeDefault {
+				return fmt.Errorf("模式参数冲突：--stream/--sync/--async 只能用一个")
+			}
+			mode = aihelpme.ModeSync
+		case "--async":
+			if mode != aihelpme.ModeDefault {
+				return fmt.Errorf("模式参数冲突：--stream/--sync/--async 只能用一个")
+			}
+			mode = aihelpme.ModeAsync
+		default:
+			rest = append(rest, a)
+		}
+	}
+	question, err := readQuestion(rest)
 	if err != nil {
 		return err
 	}
 	streamed := false
-	res, err := aihelpme.Ask(question, func(delta string) {
+	res, err := aihelpme.Ask(question, mode, func(delta string) {
 		streamed = true
 		fmt.Print(delta)
 	})
@@ -75,7 +101,11 @@ func runPut(args []string) error {
 		return err
 	}
 	if res == nil {
-		fmt.Fprintln(os.Stderr, "仍在处理中，稍后运行 aihelpme 取回答")
+		hint := "仍在处理中，稍后运行 aihelpme 取回答"
+		if mode == aihelpme.ModeAsync {
+			hint = "已入队，稍后运行 aihelpme 取回答"
+		}
+		fmt.Fprintln(os.Stderr, hint)
 		return nil
 	}
 	if res.Err != "" {

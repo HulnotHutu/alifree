@@ -59,8 +59,11 @@ make vet fmt   # 静态检查与格式化
 docker 式的 cli/daemon 结构：`aihelpme` 是薄客户端，`aihelpmed` 是常驻 daemon，队列和结果全部保存在 daemon 内存里，不落盘。
 
 ```bash
-aihelpme "Go 里怎么原子地交换两个 int？"   # put：提问后阻塞至多 5s，短问题当场得到回答
-cat big_doc.txt | aihelpme "总结这份文档"  # 管道内容拼在问题后
+aihelpme "Go 里怎么原子地交换两个 int？"   # 交付方式跟随 config.yaml 的 stream 配置
+aihelpme --stream "总结这份文档"           # 强制流式：逐字打印（覆盖 daemon 配置）
+aihelpme --sync "1+1=?"                    # 强制阻塞至多 5s，短问题当场得到回答
+aihelpme --async "帮我查一下"              # 仅入队立即返回，稍后运行 aihelpme 取回答
+cat big_doc.txt | aihelpme "总结这份文档"  # 管道内容拼在问题后（可与模式参数组合）
 aihelpme                                   # get：无输入即取最新回答，未就绪提示稍等
 aihelpme --help                            # 用法说明
 ```

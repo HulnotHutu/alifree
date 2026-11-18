@@ -20,6 +20,11 @@ import (
 
 const dbFileName = "quota.db"
 
+// maxSnapshots 是快照环形保留窗口：库内最多保留最近 30 份快照，
+// 超出的最旧快照在 Save 事务内删除（明细靠 ON DELETE CASCADE 级联清理）。
+// 设计决策见 status.md「快照环形保留」。
+const maxSnapshots = 30
+
 // legacyDir 返回旧版 JSON 归档目录，仅用于一次性迁移；测试中可替换。
 var legacyDir = func() string {
 	home, err := os.UserHomeDir()
@@ -129,7 +134,8 @@ func (s *Store) migrateModelQuotasFreeTierOnly() error {
 	return nil
 }
 
-// Save 写入一份快照，返回快照 id。快照按抓取时点入库，保留完整历史。
+// Save 写入一份快照，返回快照 id。快照按抓取时点入库，环形保留最近
+// maxSnapshots 份，超出的最旧快照在同一事务内删除。
 func (s *Store) Save(snap *bailian.Snapshot) (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -164,6 +170,15 @@ func (s *Store) Save(snap *bailian.Snapshot) (int64, error) {
 		); err != nil {
 			return 0, err
 		}
+	}
+	// 快照环形保留：id 照常递增，同一事务内删除窗口外的最旧快照，
+	// 表行数恒定 ≤ maxSnapshots，查询端零改动。
+	if _, err := tx.Exec(
+		`DELETE FROM snapshots WHERE id NOT IN (
+			SELECT id FROM snapshots ORDER BY id DESC LIMIT ?
+		)`, maxSnapshots,
+	); err != nil {
+		return 0, err
 	}
 	return id, tx.Commit()
 }

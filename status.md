@@ -306,3 +306,15 @@ text 7 / vision 4 / multimodal 3 = 23 个），保留按名搜索。其余 50 �
 realtime WebSocket 族（qwen-audio-realtime、omni-realtime、paraformer-realtime、
 livetranslate-realtime 等约 45 个）与 paraformer 录音文件识别 REST 的调用协议
 测试台尚未实现——它们本来就不属于这 7 个 REST 形态的标签页。
+
+## 快照环形保留（2026-11-17）
+
+采用循环保留：库里最多 30 份快照，超出删最旧。讨论过「slot = id % 30 取余覆盖」的字面
+环形——SQLite 能做但代价高：id 回绕后不再与时间序一致（趋势图按 id 排序会乱）、
+INSERT OR REPLACE 覆盖行会触发 FK CASCADE 删旧明细（插入顺序敏感）、Latest/History/
+迁移幂等逻辑全要适配。最终用等价实现：id 照常递增，Save 末尾同事务执行
+`DELETE FROM snapshots WHERE id NOT IN (SELECT id ... ORDER BY id DESC LIMIT 30)`，
+表行数恒定 ≤30，查询端零改动，明细靠已有的 ON DELETE CASCADE 级联清理。
+
+测试 TestSaveRingRetention：写入 35 份 → 恒定 30 份、最旧 5 份淘汰、无孤儿明细、
+History 正确。SQLite 删行不缩文件（页复用，大小趋平）；需真缩可手动 VACUUM。
